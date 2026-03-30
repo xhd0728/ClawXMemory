@@ -45,5 +45,6 @@ describe("package metadata", () => {
   it("keeps a schema-clean native plugin manifest", () => {
     expect(pluginManifest.id).toBe("openbmb-clawxmemory");
     expect(pluginManifest.main).toBeUndefined();
+    expect(pluginManifest.version).toBe(packageJson.version);
   });
 });

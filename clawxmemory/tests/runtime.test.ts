@@ -2,14 +2,162 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryPluginRuntime } from "../src/runtime.js";
+import { MemoryPluginRuntime, applyManagedMemoryBoundaryConfig } from "../src/runtime.js";
 
 describe("MemoryPluginRuntime", () => {
   const cleanupPaths: string[] = [];
+  const runtimes: MemoryPluginRuntime[] = [];
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    for (const runtime of runtimes.splice(0)) {
+      runtime.stop();
+    }
     await Promise.all(cleanupPaths.splice(0).map((target) => rm(target, { recursive: true, force: true })));
+  });
+
+  it("applies managed memory boundary config without overwriting unrelated settings", () => {
+    const source = {
+      plugins: {
+        slots: {
+          memory: "memory-core",
+        },
+        entries: {
+          "memory-core": {
+            enabled: true,
+          },
+          "openbmb-clawxmemory": {
+            enabled: false,
+            hooks: {
+              allowPromptInjection: false,
+            },
+          },
+        },
+      },
+      hooks: {
+        internal: {
+          entries: {
+            "session-memory": {
+              enabled: true,
+            },
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: "/tmp/custom-workspace",
+          memorySearch: {
+            enabled: true,
+          },
+          compaction: {
+            memoryFlush: {
+              enabled: true,
+            },
+          },
+        },
+      },
+      tools: {
+        alsoAllow: ["custom_tool", "memory_list"],
+      },
+      custom: {
+        untouched: true,
+      },
+    };
+
+    const result = applyManagedMemoryBoundaryConfig(source);
+
+    expect(result.changed).toBe(true);
+    expect(result.changedPaths).toEqual(expect.arrayContaining([
+      "plugins.slots.memory",
+      "plugins.entries.openbmb-clawxmemory.enabled",
+      "plugins.entries.openbmb-clawxmemory.hooks.allowPromptInjection",
+      "plugins.entries.memory-core.enabled",
+      "hooks.internal.entries.session-memory.enabled",
+      "agents.defaults.memorySearch.enabled",
+      "agents.defaults.compaction.memoryFlush.enabled",
+      "tools.alsoAllow",
+    ]));
+    expect(result.config).toMatchObject({
+      plugins: {
+        slots: {
+          memory: "openbmb-clawxmemory",
+        },
+        entries: {
+          "memory-core": {
+            enabled: false,
+          },
+          "openbmb-clawxmemory": {
+            enabled: true,
+            hooks: {
+              allowPromptInjection: true,
+            },
+          },
+        },
+      },
+      hooks: {
+        internal: {
+          entries: {
+            "session-memory": {
+              enabled: false,
+            },
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: "/tmp/custom-workspace",
+          memorySearch: {
+            enabled: false,
+          },
+          compaction: {
+            memoryFlush: {
+              enabled: false,
+            },
+          },
+        },
+      },
+      custom: {
+        untouched: true,
+      },
+    });
+    expect(result.config.tools).toMatchObject({
+      alsoAllow: ["custom_tool", "memory_list", "memory_overview", "memory_flush"],
+    });
+    expect(source).toMatchObject({
+      plugins: {
+        slots: {
+          memory: "memory-core",
+        },
+      },
+      hooks: {
+        internal: {
+          entries: {
+            "session-memory": {
+              enabled: true,
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("returns a no-op when the managed memory boundary is already healthy", () => {
+    const healthy = applyManagedMemoryBoundaryConfig({
+      agents: {
+        defaults: {
+          workspace: "/tmp/healthy-workspace",
+        },
+      },
+      tools: {
+        alsoAllow: ["custom_tool"],
+      },
+    }).config;
+
+    const result = applyManagedMemoryBoundaryConfig(healthy);
+
+    expect(result.changed).toBe(false);
+    expect(result.changedPaths).toEqual([]);
+    expect(result.config).toEqual(healthy);
   });
 
   it("injects dynamic recall through prependSystemContext", async () => {
@@ -25,6 +173,7 @@ describe("MemoryPluginRuntime", () => {
       },
       logger: undefined,
     });
+    runtimes.push(runtime);
 
     (runtime as { retriever: { retrieve: ReturnType<typeof vi.fn> } }).retriever = {
       retrieve: vi.fn().mockResolvedValue({
@@ -70,6 +219,7 @@ describe("MemoryPluginRuntime", () => {
       },
       logger: undefined,
     });
+    runtimes.push(runtime);
 
     await runtime.handleAgentEnd(
       {
@@ -125,6 +275,7 @@ describe("MemoryPluginRuntime", () => {
       },
       logger: undefined,
     });
+    runtimes.push(runtime);
 
     runtime.repository.insertL0Session({
       l0IndexId: "l0-contaminated",
@@ -182,5 +333,384 @@ describe("MemoryPluginRuntime", () => {
     });
 
     runtime.stop();
+  });
+
+  it("writes managed config and requests a gateway restart on first startup when native memory is still enabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    const workspaceDir = await mkdtemp(join(tmpdir(), "clawxmemory-workspace-"));
+    cleanupPaths.push(dir, workspaceDir);
+
+    const loadConfig = vi.fn().mockResolvedValue({
+      plugins: {
+        slots: {
+          memory: "memory-core",
+        },
+        entries: {
+          "memory-core": {
+            enabled: true,
+          },
+          "openbmb-clawxmemory": {
+            enabled: false,
+            hooks: {
+              allowPromptInjection: false,
+            },
+          },
+        },
+      },
+      hooks: {
+        internal: {
+          entries: {
+            "session-memory": {
+              enabled: true,
+            },
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          memorySearch: {
+            enabled: true,
+          },
+          compaction: {
+            memoryFlush: {
+              enabled: true,
+            },
+          },
+        },
+      },
+      tools: {
+        alsoAllow: ["custom_tool"],
+      },
+      custom: {
+        untouched: true,
+      },
+    });
+    const writeConfigFile = vi.fn().mockResolvedValue(undefined);
+    const runCommandWithTimeout = vi.fn().mockResolvedValue({
+      code: 0,
+      stdout: "ok",
+      stderr: "",
+      timedOut: false,
+    });
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: {
+        version: "test",
+        config: {
+          loadConfig,
+          writeConfigFile,
+        },
+        system: {
+          runCommandWithTimeout,
+        },
+      } as never,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const startBackgroundRepair = vi
+      .spyOn(runtime as never as { startBackgroundRepair: () => void }, "startBackgroundRepair")
+      .mockImplementation(() => {});
+
+    runtime.start();
+
+    await vi.waitFor(() => {
+      expect(writeConfigFile).toHaveBeenCalledTimes(1);
+      expect(runCommandWithTimeout).toHaveBeenCalledTimes(1);
+    });
+
+    expect(runCommandWithTimeout).toHaveBeenCalledWith(
+      ["openclaw", "gateway", "restart"],
+      { timeoutMs: expect.any(Number) },
+    );
+    expect(writeConfigFile.mock.calls[0]?.[0]).toMatchObject({
+      plugins: {
+        slots: {
+          memory: "openbmb-clawxmemory",
+        },
+        entries: {
+          "memory-core": {
+            enabled: false,
+          },
+          "openbmb-clawxmemory": {
+            enabled: true,
+            hooks: {
+              allowPromptInjection: true,
+            },
+          },
+        },
+      },
+      hooks: {
+        internal: {
+          entries: {
+            "session-memory": {
+              enabled: false,
+            },
+          },
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          memorySearch: {
+            enabled: false,
+          },
+          compaction: {
+            memoryFlush: {
+              enabled: false,
+            },
+          },
+        },
+      },
+      custom: {
+        untouched: true,
+      },
+    });
+    expect(writeConfigFile.mock.calls[0]?.[0]?.tools).toMatchObject({
+      alsoAllow: ["custom_tool", "memory_overview", "memory_list", "memory_flush"],
+    });
+
+    const overview = (runtime as never as {
+      getRuntimeOverview: () => Record<string, unknown>;
+    }).getRuntimeOverview();
+    expect(overview).toMatchObject({
+      slotOwner: "openbmb-clawxmemory",
+      dynamicMemoryRuntime: "ClawXMemory",
+      memoryRuntimeHealthy: true,
+      runtimeIssues: [],
+      startupRepairStatus: "running",
+    });
+    expect(startBackgroundRepair).not.toHaveBeenCalled();
+  });
+
+  it("skips config writes and restart when the managed boundary is already healthy", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    const workspaceDir = await mkdtemp(join(tmpdir(), "clawxmemory-workspace-"));
+    cleanupPaths.push(dir, workspaceDir);
+
+    const healthyConfig = applyManagedMemoryBoundaryConfig({
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+        },
+      },
+      tools: {
+        alsoAllow: ["custom_tool"],
+      },
+    }).config;
+    const loadConfig = vi.fn().mockResolvedValue(healthyConfig);
+    const writeConfigFile = vi.fn().mockResolvedValue(undefined);
+    const runCommandWithTimeout = vi.fn();
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: {
+        version: "test",
+        config: {
+          loadConfig,
+          writeConfigFile,
+        },
+        system: {
+          runCommandWithTimeout,
+        },
+      } as never,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const startBackgroundRepair = vi
+      .spyOn(runtime as never as { startBackgroundRepair: () => void }, "startBackgroundRepair")
+      .mockImplementation(() => {});
+
+    runtime.start();
+
+    await vi.waitFor(() => {
+      expect(startBackgroundRepair).toHaveBeenCalledTimes(1);
+    });
+
+    expect(writeConfigFile).not.toHaveBeenCalled();
+    expect(runCommandWithTimeout).not.toHaveBeenCalled();
+
+    const overview = (runtime as never as {
+      getRuntimeOverview: () => Record<string, unknown>;
+    }).getRuntimeOverview();
+    expect(overview).toMatchObject({
+      slotOwner: "openbmb-clawxmemory",
+      memoryRuntimeHealthy: true,
+      runtimeIssues: [],
+      startupRepairStatus: "idle",
+    });
+  });
+
+  it("surfaces startup repair failure when config write fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    const workspaceDir = await mkdtemp(join(tmpdir(), "clawxmemory-workspace-"));
+    cleanupPaths.push(dir, workspaceDir);
+
+    const loadConfig = vi.fn().mockResolvedValue({
+      plugins: {
+        slots: {
+          memory: "memory-core",
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          memorySearch: {
+            enabled: true,
+          },
+          compaction: {
+            memoryFlush: {
+              enabled: true,
+            },
+          },
+        },
+      },
+      hooks: {
+        internal: {
+          entries: {
+            "session-memory": {
+              enabled: true,
+            },
+          },
+        },
+      },
+    });
+    const writeConfigFile = vi.fn().mockRejectedValue(new Error("config write denied"));
+    const runCommandWithTimeout = vi.fn();
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: {
+        version: "test",
+        config: {
+          loadConfig,
+          writeConfigFile,
+        },
+        system: {
+          runCommandWithTimeout,
+        },
+      } as never,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const startBackgroundRepair = vi
+      .spyOn(runtime as never as { startBackgroundRepair: () => void }, "startBackgroundRepair")
+      .mockImplementation(() => {});
+
+    runtime.start();
+
+    await vi.waitFor(() => {
+      const overview = (runtime as never as {
+        getRuntimeOverview: () => Record<string, unknown>;
+      }).getRuntimeOverview();
+      expect(overview.startupRepairStatus).toBe("failed");
+    });
+
+    const overview = (runtime as never as {
+      getRuntimeOverview: () => Record<string, unknown>;
+    }).getRuntimeOverview();
+    expect(overview.startupRepairMessage).toBe("config write denied");
+    expect(runCommandWithTimeout).not.toHaveBeenCalled();
+    expect(startBackgroundRepair).not.toHaveBeenCalled();
+  });
+
+  it("surfaces startup repair failure when the restart request fails", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    const workspaceDir = await mkdtemp(join(tmpdir(), "clawxmemory-workspace-"));
+    cleanupPaths.push(dir, workspaceDir);
+
+    const loadConfig = vi.fn().mockResolvedValue({
+      plugins: {
+        slots: {
+          memory: "memory-core",
+        },
+      },
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          memorySearch: {
+            enabled: true,
+          },
+          compaction: {
+            memoryFlush: {
+              enabled: true,
+            },
+          },
+        },
+      },
+      hooks: {
+        internal: {
+          entries: {
+            "session-memory": {
+              enabled: true,
+            },
+          },
+        },
+      },
+    });
+    const writeConfigFile = vi.fn().mockResolvedValue(undefined);
+    const runCommandWithTimeout = vi.fn().mockResolvedValue({
+      code: 1,
+      stdout: "",
+      stderr: "gateway restart failed",
+      timedOut: false,
+    });
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: {
+        version: "test",
+        config: {
+          loadConfig,
+          writeConfigFile,
+        },
+        system: {
+          runCommandWithTimeout,
+        },
+      } as never,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const startBackgroundRepair = vi
+      .spyOn(runtime as never as { startBackgroundRepair: () => void }, "startBackgroundRepair")
+      .mockImplementation(() => {});
+
+    runtime.start();
+
+    await vi.waitFor(() => {
+      const overview = (runtime as never as {
+        getRuntimeOverview: () => Record<string, unknown>;
+      }).getRuntimeOverview();
+      expect(overview.startupRepairStatus).toBe("failed");
+    });
+
+    const overview = (runtime as never as {
+      getRuntimeOverview: () => Record<string, unknown>;
+    }).getRuntimeOverview();
+    expect(overview.startupRepairMessage).toBe("gateway restart failed");
+    expect(writeConfigFile).toHaveBeenCalledTimes(1);
+    expect(runCommandWithTimeout).toHaveBeenCalledTimes(1);
+    expect(startBackgroundRepair).not.toHaveBeenCalled();
   });
 });

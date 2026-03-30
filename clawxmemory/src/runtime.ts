@@ -37,11 +37,15 @@ import { join, resolve } from "node:path";
 const MEMORY_REPAIR_VERSION = "2026-03-24-recall-injection-cleanup-v15";
 const INDEXING_SETTINGS_MIGRATION_VERSION = "2026-03-16-reasoning-mode-settings-v1";
 const PLUGIN_ID = "openbmb-clawxmemory";
+const NATIVE_MEMORY_PLUGIN_ID = "memory-core";
+const CHAT_FACING_MEMORY_TOOLS = ["memory_overview", "memory_list", "memory_flush"] as const;
+const MANAGED_BOUNDARY_RESTART_TIMEOUT_MS = process.platform === "win32" ? 15_000 : 8_000;
 const RECENT_INBOUND_TTL_MS = 30_000;
 const COMMAND_REPLY_TTL_MS = 10_000;
 const NON_MEMORY_TURN_TTL_MS = 15_000;
 const STARTUP_REPAIR_SNAPSHOT_LIMIT = 200;
 const STARTUP_FALLBACK_GREETING = "I'm ready. What would you like to do?";
+const STARTUP_BOUNDARY_RUNNING_MESSAGE = "Applying managed OpenClaw memory config and requesting a gateway restart.";
 
 interface MemoryBoundaryDiagnostics {
   slotOwner: string;
@@ -49,6 +53,13 @@ interface MemoryBoundaryDiagnostics {
   workspaceBootstrapPresent: boolean;
   memoryRuntimeHealthy: boolean;
   runtimeIssues: string[];
+  managedConfigIssues: string[];
+}
+
+export interface ManagedMemoryBoundaryApplyResult {
+  changed: boolean;
+  changedPaths: string[];
+  config: Record<string, unknown>;
 }
 
 interface LoggerLike {
@@ -86,6 +97,121 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+function ensureObject(parent: Record<string, unknown>, key: string): Record<string, unknown> {
+  const current = parent[key];
+  if (!current || typeof current !== "object" || Array.isArray(current)) {
+    parent[key] = {};
+  }
+  return parent[key] as Record<string, unknown>;
+}
+
+function cloneJson<T>(value: T): T {
+  if (typeof structuredClone === "function") {
+    return structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function normalizeStringList(values: unknown[]): string[] {
+  return Array.from(
+    new Set(
+      values
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function setManagedValue(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+  path: string,
+  changedPaths: string[],
+): void {
+  if (target[key] === value) return;
+  target[key] = value;
+  changedPaths.push(path);
+}
+
+export function applyManagedMemoryBoundaryConfig(
+  source: Record<string, unknown> | undefined,
+): ManagedMemoryBoundaryApplyResult {
+  const config = cloneJson(source ?? {});
+  const changedPaths: string[] = [];
+
+  const plugins = ensureObject(config, "plugins");
+  const slots = ensureObject(plugins, "slots");
+  const entries = ensureObject(plugins, "entries");
+  const pluginEntry = ensureObject(entries, PLUGIN_ID);
+  const pluginHooks = ensureObject(pluginEntry, "hooks");
+  const memoryCore = ensureObject(entries, NATIVE_MEMORY_PLUGIN_ID);
+  const internalHooks = ensureObject(ensureObject(ensureObject(config, "hooks"), "internal"), "entries");
+  const sessionMemory = ensureObject(internalHooks, "session-memory");
+  const agents = ensureObject(config, "agents");
+  const defaults = ensureObject(agents, "defaults");
+  const memorySearch = ensureObject(defaults, "memorySearch");
+  const compaction = ensureObject(defaults, "compaction");
+  const memoryFlush = ensureObject(compaction, "memoryFlush");
+  const tools = ensureObject(config, "tools");
+
+  setManagedValue(slots, "memory", PLUGIN_ID, "plugins.slots.memory", changedPaths);
+  setManagedValue(pluginEntry, "enabled", true, `plugins.entries.${PLUGIN_ID}.enabled`, changedPaths);
+  setManagedValue(
+    pluginHooks,
+    "allowPromptInjection",
+    true,
+    `plugins.entries.${PLUGIN_ID}.hooks.allowPromptInjection`,
+    changedPaths,
+  );
+  setManagedValue(
+    memoryCore,
+    "enabled",
+    false,
+    `plugins.entries.${NATIVE_MEMORY_PLUGIN_ID}.enabled`,
+    changedPaths,
+  );
+  setManagedValue(
+    sessionMemory,
+    "enabled",
+    false,
+    "hooks.internal.entries.session-memory.enabled",
+    changedPaths,
+  );
+  setManagedValue(
+    memorySearch,
+    "enabled",
+    false,
+    "agents.defaults.memorySearch.enabled",
+    changedPaths,
+  );
+  setManagedValue(
+    memoryFlush,
+    "enabled",
+    false,
+    "agents.defaults.compaction.memoryFlush.enabled",
+    changedPaths,
+  );
+
+  const currentAlsoAllow = Array.isArray(tools.alsoAllow) ? normalizeStringList(tools.alsoAllow) : [];
+  const nextAlsoAllow = normalizeStringList([...currentAlsoAllow, ...CHAT_FACING_MEMORY_TOOLS]);
+  if (!arraysEqual(currentAlsoAllow, nextAlsoAllow)) {
+    tools.alsoAllow = nextAlsoAllow;
+    changedPaths.push("tools.alsoAllow");
+  }
+
+  return {
+    changed: changedPaths.length > 0,
+    changedPaths,
+    config,
+  };
 }
 
 function getConfigValue(root: Record<string, unknown> | undefined, path: string[]): unknown {
@@ -268,7 +394,8 @@ export class MemoryPluginRuntime {
   readonly indexer: HeartbeatIndexer;
   readonly retriever: ReasoningRetriever;
 
-  private readonly apiConfig: Record<string, unknown> | undefined;
+  private readonly pluginRuntime: PluginRuntime | undefined;
+  private currentApiConfig: Record<string, unknown> | undefined;
   private readonly pendingBySession = new Map<string, MemoryMessage[]>();
   private readonly idleIndexTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly debouncedSessions = new Set<string>();
@@ -295,7 +422,8 @@ export class MemoryPluginRuntime {
 
   constructor(options: MemoryPluginRuntimeOptions) {
     this.logger = safeLog(options.logger);
-    this.apiConfig = options.apiConfig;
+    this.pluginRuntime = options.pluginRuntime;
+    this.currentApiConfig = options.apiConfig;
     this.config = buildPluginConfig(options.pluginConfig);
 
     const skills = this.config.skillsDir
@@ -427,8 +555,7 @@ export class MemoryPluginRuntime {
     this.started = true;
     this.rescheduleHeartbeat();
     this.uiServer?.start();
-    this.startBackgroundRepair();
-    this.logMemoryBoundaryDiagnostics();
+    void this.runStartupInitialization();
   }
 
   stop(): void {
@@ -1008,30 +1135,95 @@ export class MemoryPluginRuntime {
   }
 
   private resolveWorkspaceDir(): string {
-    const configured = getConfigString(this.apiConfig, ["agents", "defaults", "workspace"]);
+    const configured = getConfigString(this.currentApiConfig, ["agents", "defaults", "workspace"]);
     return resolve(configured || join(homedir(), ".openclaw", "workspace"));
+  }
+
+  private async runStartupInitialization(): Promise<void> {
+    const boundaryState = await this.reconcileManagedMemoryBoundary();
+    this.logMemoryBoundaryDiagnostics();
+    if (boundaryState !== "ready") return;
+    this.startBackgroundRepair();
+  }
+
+  private async reconcileManagedMemoryBoundary(): Promise<"ready" | "restarting" | "failed"> {
+    if (!this.pluginRuntime) return "ready";
+
+    try {
+      const loaded = await Promise.resolve(this.pluginRuntime.config.loadConfig());
+      this.currentApiConfig = asObject(loaded) ?? {};
+    } catch (error) {
+      this.logger.warn?.(`[clawxmemory] failed to load OpenClaw config for managed memory boundary: ${String(error)}`);
+    }
+
+    const diagnostics = this.collectMemoryBoundaryDiagnostics();
+    if (diagnostics.managedConfigIssues.length === 0) return "ready";
+
+    const repair = applyManagedMemoryBoundaryConfig(this.currentApiConfig);
+
+    try {
+      if (repair.changed) {
+        await this.pluginRuntime.config.writeConfigFile(repair.config);
+        this.logger.info?.(
+          `[clawxmemory] managed memory config updated: ${repair.changedPaths.join(", ")}`,
+        );
+      } else {
+        this.logger.info?.("[clawxmemory] managed memory config already matches desired state; restarting gateway.");
+      }
+      this.currentApiConfig = repair.config;
+      this.setStartupRepairState("running", { message: STARTUP_BOUNDARY_RUNNING_MESSAGE });
+
+      const restart = await this.pluginRuntime.system.runCommandWithTimeout(
+        ["openclaw", "gateway", "restart"],
+        { timeoutMs: MANAGED_BOUNDARY_RESTART_TIMEOUT_MS },
+      );
+
+      if (restart.termination === "timeout" || restart.termination === "no-output-timeout") {
+        this.logger.warn?.("[clawxmemory] `openclaw gateway restart` timed out after managed memory config update; waiting for restart.");
+        return "restarting";
+      }
+      if (restart.code !== 0) {
+        const stderr = typeof restart.stderr === "string" ? restart.stderr.trim() : "";
+        const stdout = typeof restart.stdout === "string" ? restart.stdout.trim() : "";
+        throw new Error(stderr || stdout || `openclaw gateway restart exited with ${restart.code}`);
+      }
+
+      this.logger.info?.("[clawxmemory] managed memory config applied; gateway restart requested.");
+      return "restarting";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.setStartupRepairState("failed", { message });
+      this.logger.warn?.(`[clawxmemory] managed memory boundary repair failed: ${message}`);
+      return "failed";
+    }
   }
 
   private collectMemoryBoundaryDiagnostics(): MemoryBoundaryDiagnostics {
     const runtimeIssues: string[] = [];
-    const slotOwner = getConfigString(this.apiConfig, ["plugins", "slots", "memory"]);
+    const managedConfigIssues: string[] = [];
+    const pushManagedIssue = (message: string): void => {
+      runtimeIssues.push(message);
+      managedConfigIssues.push(message);
+    };
+
+    const slotOwner = getConfigString(this.currentApiConfig, ["plugins", "slots", "memory"]);
     if (slotOwner !== PLUGIN_ID) {
-      runtimeIssues.push(`plugins.slots.memory=${slotOwner || "(empty)"}`);
+      pushManagedIssue(`plugins.slots.memory=${slotOwner || "(empty)"}`);
     }
-    if (getConfigBoolean(this.apiConfig, ["plugins", "entries", "memory-core", "enabled"]) !== false) {
-      runtimeIssues.push("plugins.entries.memory-core.enabled should be false");
+    if (getConfigBoolean(this.currentApiConfig, ["plugins", "entries", NATIVE_MEMORY_PLUGIN_ID, "enabled"]) !== false) {
+      pushManagedIssue(`plugins.entries.${NATIVE_MEMORY_PLUGIN_ID}.enabled should be false`);
     }
-    if (getConfigBoolean(this.apiConfig, ["hooks", "internal", "entries", "session-memory", "enabled"]) !== false) {
-      runtimeIssues.push("hooks.internal.entries.session-memory.enabled should be false");
+    if (getConfigBoolean(this.currentApiConfig, ["hooks", "internal", "entries", "session-memory", "enabled"]) !== false) {
+      pushManagedIssue("hooks.internal.entries.session-memory.enabled should be false");
     }
-    if (getConfigBoolean(this.apiConfig, ["agents", "defaults", "memorySearch", "enabled"]) !== false) {
-      runtimeIssues.push("agents.defaults.memorySearch.enabled should be false");
+    if (getConfigBoolean(this.currentApiConfig, ["agents", "defaults", "memorySearch", "enabled"]) !== false) {
+      pushManagedIssue("agents.defaults.memorySearch.enabled should be false");
     }
-    if (getConfigBoolean(this.apiConfig, ["agents", "defaults", "compaction", "memoryFlush", "enabled"]) !== false) {
-      runtimeIssues.push("agents.defaults.compaction.memoryFlush.enabled should be false");
+    if (getConfigBoolean(this.currentApiConfig, ["agents", "defaults", "compaction", "memoryFlush", "enabled"]) !== false) {
+      pushManagedIssue("agents.defaults.compaction.memoryFlush.enabled should be false");
     }
-    if (getConfigBoolean(this.apiConfig, ["plugins", "entries", PLUGIN_ID, "hooks", "allowPromptInjection"]) === false) {
-      runtimeIssues.push(`plugins.entries.${PLUGIN_ID}.hooks.allowPromptInjection should not be false`);
+    if (getConfigBoolean(this.currentApiConfig, ["plugins", "entries", PLUGIN_ID, "hooks", "allowPromptInjection"]) === false) {
+      pushManagedIssue(`plugins.entries.${PLUGIN_ID}.hooks.allowPromptInjection should not be false`);
     }
     if (!this.config.recallEnabled) {
       runtimeIssues.push("plugin config recallEnabled=false");
@@ -1055,11 +1247,22 @@ export class MemoryPluginRuntime {
       workspaceBootstrapPresent,
       memoryRuntimeHealthy: runtimeIssues.length === 0,
       runtimeIssues,
+      managedConfigIssues,
     };
   }
 
   private logMemoryBoundaryDiagnostics(): void {
     const diagnostics = this.collectMemoryBoundaryDiagnostics();
+    if (this.startupRepairStatus === "running") {
+      const message = this.startupRepairMessage || STARTUP_BOUNDARY_RUNNING_MESSAGE;
+      this.logger.info?.(`[clawxmemory] startup fix in progress: ${message}`);
+      return;
+    }
+    if (this.startupRepairStatus === "failed") {
+      const message = this.startupRepairMessage || "startup fix failed";
+      this.logger.warn?.(`[clawxmemory] startup fix failed: ${message}`);
+      return;
+    }
     if (diagnostics.memoryRuntimeHealthy) {
       this.logger.info?.("[clawxmemory] dynamic memory runtime ready: active memory slot is ClawXMemory.");
       return;

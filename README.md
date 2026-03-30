@@ -44,7 +44,6 @@ ClawXMemory focuses on three core questions: what to remember, how to organize i
 
 ```bash
 openclaw plugins install clawhub:openbmb-clawxmemory
-openclaw gateway restart
 ```
 
 The package is also published on npm:
@@ -54,6 +53,8 @@ npm install openbmb-clawxmemory
 ```
 
 Use `openclaw plugins install clawhub:openbmb-clawxmemory` for the intended OpenClaw activation path; plain npm install is mainly useful for package inspection or custom packaging workflows.
+
+On the first install, ClawXMemory may rewrite the managed OpenClaw memory settings and request one gateway restart automatically. Wait for that restart to settle before checking the dashboard.
 
 If your OpenClaw setup uses `tools.profile: "coding"` or any explicit allowlist, you also need to expose these three chat-facing tools to the agent. Otherwise, even though the plugin is loaded, the model side will still only see `memory_search` / `memory_get`:
 
@@ -108,6 +109,41 @@ OPENCLAW_CONFIG_PATH=/path/to/openclaw.json npm run relink
 -> use `npm run relink`
 - Reloading after code-only changes
 -> use `npm run reload`
+
+#### Uninstall / clean reinstall
+
+Use this when you want to hand memory ownership back to native OpenClaw before testing another install path:
+
+```bash
+npm run uninstall
+```
+
+`npm run uninstall` restores `memory-core` as the active memory slot and removes the managed plugin config and install records. If you need a fully clean reinstall afterwards, also remove the leftover extension directory that OpenClaw may keep on disk:
+
+```bash
+rm -rf ~/.openclaw/extensions/openbmb-clawxmemory
+```
+
+#### Pre-publish smoke test
+
+To validate the local source install path before publishing to ClawHub:
+
+```bash
+npm run uninstall
+rm -rf ~/.openclaw/extensions/openbmb-clawxmemory
+openclaw plugins install .
+openclaw gateway restart
+openclaw plugins inspect openbmb-clawxmemory --json
+```
+
+To validate the packaged artifact, which is closer to the real release path:
+
+```bash
+npm pack
+openclaw plugins install ./openbmb-clawxmemory-*.tgz
+openclaw gateway restart
+openclaw plugins inspect openbmb-clawxmemory --json
+```
 
 ### Installation verification
 

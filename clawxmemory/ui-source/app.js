@@ -78,11 +78,11 @@ const LOCALES = {
     "status.retrieved": "检索完成",
     "status.loading": "加载中…",
     "status.ready": "已就绪",
-    "status.startupRepairRunning": "正在加载已有记忆，后台校验中…",
-    "status.startupRepairPillRunning": "后台校验中",
-    "status.startupRepairFailed": "启动校验失败，暂时显示上次记忆快照",
-    "status.startupRepairFailedWithDetail": "启动校验失败，暂时显示上次记忆快照：{0}",
-    "status.startupRepairPillFailed": "启动校验失败",
+    "status.startupRepairRunning": "正在应用启动修复…",
+    "status.startupRepairPillRunning": "启动修复中",
+    "status.startupRepairFailed": "启动修复失败，当前状态可能未完全生效",
+    "status.startupRepairFailedWithDetail": "启动修复失败：{0}",
+    "status.startupRepairPillFailed": "启动修复失败",
     "status.loadFail": "加载失败：{0}",
     "status.queryRequired": "请输入检索问题",
     "status.settingsSaved": "设置已保存 · {0}",
@@ -188,6 +188,9 @@ const LOCALES = {
     "boundary.conflictMemoryFlush": "OpenClaw 原生 memoryFlush 还没关闭",
     "boundary.conflictPromptInjection": "插件 prompt 注入被宿主配置禁用了",
     "boundary.conflictRecallDisabled": "插件 recallEnabled 被关闭了",
+    "boundary.startupFixRunning": "启动修复中",
+    "boundary.startupFixFailed": "启动修复失败",
+    "boundary.pendingRestart": "等待重启",
     "status.conflictsDetected": "检测到动态记忆运行时问题 {0} 项",
     "enough.l2": "L2",
     "enough.l1": "L1",
@@ -290,10 +293,10 @@ const LOCALES = {
     "status.retrieved": "Retrieval complete",
     "status.loading": "Loading…",
     "status.ready": "Ready",
-    "status.startupRepairRunning": "Loading existing memory while startup validation runs…",
-    "status.startupRepairPillRunning": "Startup validation",
-    "status.startupRepairFailed": "Startup validation failed; showing the last memory snapshot",
-    "status.startupRepairFailedWithDetail": "Startup validation failed; showing the last memory snapshot: {0}",
+    "status.startupRepairRunning": "Applying startup fixes…",
+    "status.startupRepairPillRunning": "Startup fixes",
+    "status.startupRepairFailed": "Startup fixes failed; the current state may be incomplete",
+    "status.startupRepairFailedWithDetail": "Startup fixes failed: {0}",
     "status.startupRepairPillFailed": "Startup failed",
     "status.loadFail": "Load failed: {0}",
     "status.queryRequired": "Please enter a query",
@@ -400,6 +403,9 @@ const LOCALES = {
     "boundary.conflictMemoryFlush": "Native memoryFlush is still enabled somewhere",
     "boundary.conflictPromptInjection": "Prompt injection is disabled for the plugin",
     "boundary.conflictRecallDisabled": "Plugin recallEnabled is disabled",
+    "boundary.startupFixRunning": "Startup fix in progress",
+    "boundary.startupFixFailed": "Startup fix failed",
+    "boundary.pendingRestart": "Pending restart",
     "status.conflictsDetected": "Detected {0} dynamic-memory runtime issues",
     "enough.l2": "L2",
     "enough.l1": "L1",
@@ -714,12 +720,12 @@ function updateStatusPill(overview = {}) {
   const conflictCount = Array.isArray(overview.runtimeIssues) ? overview.runtimeIssues.length : 0;
   const startupRepairStatus = String(overview.startupRepairStatus || "idle");
   if (statusPill) {
-  if (conflictCount > 0) {
-    statusPill.textContent = t("status.conflictsDetected", conflictCount);
-    statusPill.dataset.tone = "warning";
-    } else if (startupRepairStatus === "running") {
+    if (startupRepairStatus === "running") {
       statusPill.textContent = t("status.startupRepairPillRunning");
       statusPill.dataset.tone = "pending";
+    } else if (conflictCount > 0) {
+      statusPill.textContent = t("status.conflictsDetected", conflictCount);
+      statusPill.dataset.tone = "warning";
     } else if (startupRepairStatus === "failed") {
       statusPill.textContent = t("status.startupRepairPillFailed");
       statusPill.dataset.tone = "warning";
@@ -860,6 +866,10 @@ function renderOverview(overview = {}) {
   const slotOwner = String(overview.slotOwner || "").trim();
   const dynamicMemoryRuntime = String(overview.dynamicMemoryRuntime || "").trim();
   const workspaceBootstrapPresent = Boolean(overview.workspaceBootstrapPresent);
+  const startupRepairStatus = String(overview.startupRepairStatus || "idle");
+  const startupRepairMessage = String(overview.startupRepairMessage || "").trim();
+  const startupRepairRunning = startupRepairStatus === "running";
+  const startupRepairFailed = startupRepairStatus === "failed";
   const lastRecallInjected = Boolean(overview.lastRecallInjected);
   const lastRecallEnoughAt = overview.lastRecallEnoughAt || "none";
   const lastRecallCacheHit = Boolean(overview.lastRecallCacheHit);
@@ -868,6 +878,20 @@ function renderOverview(overview = {}) {
   const lastRecallBudgetLimited = Boolean(overview.lastRecallBudgetLimited);
   const lastShadowDeepQueued = Boolean(overview.lastShadowDeepQueued);
   const primaryConflict = formatConflictSummary(runtimeIssues[0]);
+  const healthTone = startupRepairRunning ? "warning" : startupRepairFailed ? "danger" : memoryRuntimeHealthy ? "success" : "danger";
+  const healthSummary = startupRepairRunning
+    ? t("boundary.pendingRestart")
+    : startupRepairFailed
+      ? t("boundary.startupFixFailed")
+      : memoryRuntimeHealthy
+        ? t("boundary.healthy")
+        : t("boundary.conflicted");
+  const healthDetail = startupRepairMessage
+    || (startupRepairRunning
+      ? t("boundary.startupFixRunning")
+      : startupRepairFailed
+        ? t("boundary.startupFixFailed")
+        : primaryConflict);
 
   const heroRow = document.createElement("div");
   heroRow.className = "ov-hero-row";
@@ -922,14 +946,18 @@ function renderOverview(overview = {}) {
     createMetricCell(
       t("overview.slotOwner"),
       slotOwner || t("boundary.ownerMissing"),
-      memoryRuntimeHealthy ? "success" : "danger",
-      memoryRuntimeHealthy ? t("boundary.healthy") : t("boundary.conflicted"),
+      healthTone,
+      healthSummary,
     ),
     createMetricCell(
       t("overview.dynamicRuntime"),
       dynamicMemoryRuntime || t("boundary.runtimeMisconfigured"),
-      memoryRuntimeHealthy ? "success" : "danger",
-      memoryRuntimeHealthy ? t("boundary.runtimeClawXMemory") : primaryConflict,
+      healthTone,
+      startupRepairRunning || startupRepairFailed
+        ? healthDetail
+        : memoryRuntimeHealthy
+          ? t("boundary.runtimeClawXMemory")
+          : primaryConflict,
     ),
     createMetricCell(
       t("overview.workspaceBootstrap"),
@@ -939,9 +967,9 @@ function renderOverview(overview = {}) {
     ),
     createMetricCell(
       t("overview.runtimeIssues"),
-      runtimeIssues.length,
-      runtimeIssues.length > 0 ? "danger" : "default",
-      primaryConflict,
+      startupRepairRunning ? t("boundary.pendingRestart") : runtimeIssues.length,
+      startupRepairRunning ? "warning" : runtimeIssues.length > 0 ? "danger" : "default",
+      startupRepairRunning || startupRepairFailed ? healthDetail : primaryConflict,
     ),
   );
   const g4 = createOvGroup("overview.group.health", "health", healthGrid);

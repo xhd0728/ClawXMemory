@@ -15,7 +15,6 @@ It is responsible for:
 
 ```bash
 openclaw plugins install clawhub:openbmb-clawxmemory
-openclaw gateway restart
 ```
 
 If you want to install directly from npm for inspection or custom packaging workflows:
@@ -23,6 +22,8 @@ If you want to install directly from npm for inspection or custom packaging work
 ```bash
 npm install openbmb-clawxmemory
 ```
+
+On the first install, ClawXMemory may rewrite the managed OpenClaw memory settings and request one gateway restart automatically. Wait for that restart to finish before checking the dashboard or running `plugins inspect`.
 
 After installation, it is recommended to verify the plugin status:
 
@@ -75,6 +76,29 @@ For local OpenClaw integration and debugging:
 npm run relink
 npm run reload
 npm run uninstall
+```
+
+`npm run uninstall` restores native OpenClaw memory ownership and removes the managed plugin config/install records. If you need a fully clean reinstall after that, also remove the leftover extension directory that OpenClaw may keep on disk:
+
+```bash
+rm -rf ~/.openclaw/extensions/openbmb-clawxmemory
+```
+
+Before publishing to ClawHub, you can smoke test either installation path from this directory:
+
+```bash
+npm run uninstall
+rm -rf ~/.openclaw/extensions/openbmb-clawxmemory
+openclaw plugins install .
+openclaw gateway restart
+openclaw plugins inspect openbmb-clawxmemory --json
+```
+
+```bash
+npm pack
+openclaw plugins install ./openbmb-clawxmemory-*.tgz
+openclaw gateway restart
+openclaw plugins inspect openbmb-clawxmemory --json
 ```
 
 ## Publish to ClawHub
