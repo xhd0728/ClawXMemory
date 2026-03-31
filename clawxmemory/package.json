@@ -13,6 +13,7 @@
     "type": "git",
     "url": "git+https://github.com/OpenBMB/ClawXMemory.git"
   },
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/OpenBMB/ClawXMemory/issues"
   },
@@ -36,7 +37,8 @@
     "agent-skills",
     "skills",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -b --force && node ./scripts/copy-ui.mjs",
