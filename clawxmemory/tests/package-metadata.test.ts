@@ -20,7 +20,7 @@ describe("package metadata", () => {
         "agent-skills",
         "skills",
         "openclaw.plugin.json",
-        "README.md",
+        "LICENSE",
       ]),
     );
   });
