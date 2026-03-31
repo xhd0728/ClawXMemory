@@ -1,12 +1,12 @@
 <p align="center">
   <picture>
-    <img alt="ClawXMemory" src="./docs/image/logo.png" width="90%">
+    <img alt="ClawXMemory" src="./docs/image/logo.png" width="65%">
   </picture>
 </p>
 
-<h3 align="center">
-Memory as Structure
-</h3>
+<p align="center">
+  <b>A Multi-Level Memory System for Long-Term Context</b>
+</p>
 
 <p align="center">
   <a href="./docs/README_zh.md"><b>简体中文</b></a> &nbsp;|&nbsp; <b>English</b>
@@ -16,71 +16,80 @@ Memory as Structure
 
 ## 📖 About ClawXMemory
 
-ClawXMemory is a memory system jointly released by Tsinghua University's THUNLP Lab, OpenBMB, ModelBest, and AI9Stars. Built on EdgeClaw's native long-term memory capability, it introduces a structured abstraction and systematic extension of the memory mechanism, then packages that design as a plugin so it can integrate cleanly into the OpenClaw ecosystem as a reusable general-purpose memory module. ClawXMemory is not a simple incremental enhancement to existing memory. It brings OpenClaw a structured, multi-level, evolvable long-term memory system: during conversations, information is gradually distilled into memory fragments and continuously aggregated into project memory, timeline memory, and user profiles; before each response, the model actively follows the memory structure to select and locate relevant memory layer by layer, bringing in only the context that is actually useful.
+ClawXMemory is a memory system jointly developed by Tsinghua University's THUNLP Lab, OpenBMB, ModelBest, and AI9Stars.
 
-ClawXMemory focuses on three core questions: what to remember, how to organize it, and how to make it truly usable. It provides three corresponding capabilities:
+Built on EdgeClaw's native long-term memory capability, it introduces a deeply structured abstraction and systematic extension of the memory mechanism, then plugs into the OpenClaw ecosystem through a plugin-based design. ClawXMemory is not just a simple accumulation of historical context for large models. Instead, it provides a structured, multi-level, and evolvable long-term memory system. During conversations, the system gradually distills scattered information into memory fragments, then further aggregates them into project memory, timeline memory, and user profiles. When generating a response, the model actively reasons and navigates along this "memory tree," bringing only genuinely useful and highly relevant context into the current conversation.
 
-- Structured multi-level memory: extract and aggregate conversations from L0 -> L1 -> L2, building an evolvable memory structure instead of stopping at flat history logs
-- Model-driven selection and reasoning: rather than relying on conventional retrieval, the model follows memory indexes to choose relevant memory and reason over the needed context level by level
-- Memory management and visualization: a local visual dashboard provides both canvas and list views so the memory structure and hierarchy remain easy to inspect; all memory is stored in local SQLite, and import/export support lets you migrate the full memory state across devices in one step
+To address what to remember, how to organize it, and how to actually make memory usable, ClawXMemory provides three core capabilities:
+
+- **Structured multi-level memory system**: Move beyond flat history logs. The system progressively extracts and aggregates raw conversations (L0) into memory fragments (L1) and higher-level memories (L2), building a richer memory structure that keeps growing and evolving with user interaction.
+- **Model-driven selection and reasoning**: Instead of relying on rigid vector retrieval, ClawXMemory lets the model actively "think" along the memory index, locating and reasoning over relevant context layer by layer.
+- **Memory management and visualization**: A built-in visual dashboard offers both canvas and list views, making the hierarchy and relationships of memory easy to inspect. All data is stored locally in SQLite by default, with one-click import and export for seamless state migration across devices.
+
+### ⚙️ How ClawXMemory Works
+
+ClawXMemory can be summarized as: hierarchical memory construction + model-driven selection. It quietly turns everyday conversations into a structured knowledge base for long-term context modeling.
+
+> [!TIP]
+> **Example: continuously advancing a long-running task**
+>
+> If you use AI to iterate on a paper over time, earlier discussions do not disappear when the context window refreshes, nor do they turn into disconnected text fragments. Instead, the system automatically consolidates them into the current state of that project.
+>
+> When you later ask, "What stage am I at now?", the system answers directly from that structured state instead of searching for a needle in a haystack across historical chats.
+
+#### 1. Building the multi-level memory index
+
+During memory construction, ClawXMemory takes the conversation stream as input and silently refines and organizes information layer by layer in the background:
+
+| Memory level | Type | Meaning |
+| :--- | :--- | :--- |
+| **L2** | **Project Memory** | Long-term high-level memory aggregated around a specific topic or task |
+| **L2** | **Time Memory** | Periodic memory aggregated along a timeline, such as by day or week |
+| **L1** | **Memory Fragments** | Structured core summaries generated for closed topics |
+| **L0** | **Raw Conversation** | The lowest-level original message records |
+| **Global** | **Profile** | A continuously updated singleton global user profile |
+
+The whole process requires no manual action. You can stay focused on natural conversation and task progress: short-term context handles the current multi-turn exchange, while ClawXMemory turns those experiences into reusable long-term assets in the background.
+
+<p align="center">
+  <picture>
+    <img alt="build memory index" src="./docs/image/build_en.png" width=70%>
+  </picture>
+</p>
+
+#### 2. Model-driven memory selection and reasoning
+
+The pain point of traditional memory systems is often not the lack of memory, but the fact that they have retrieval without understanding. When a user asks questions like "What stage is this project at now?", "How did we finalize that plan last week?", or "Didn't you remember that I prefer Chinese wording?", the real challenge is not just finding a highly similar text snippet. It is whether the system knows which part of memory to inspect, and how deeply it needs to dig.
+
+ClawXMemory addresses this by turning passive retrieval into active reasoning. The model explores the multi-level memory structure on its own. It first evaluates relevance from higher-level memory such as project memory, time memory, or user profile. Only when that is not enough does it drill down into finer-grained memory fragments, and when necessary it can even trace back to a specific raw conversation.
+
+<p align="center">
+  <picture>
+    <img alt="memory selection and inference" src="./docs/image/inference_en.png" width=50%>
+  </picture>
+</p>
+
+This process is closer to how a human expert would progressively reason along memory structure than how a database would blindly run `SELECT *`. What finally enters the model generation step is no longer a long history packed in as much as possible, but carefully filtered context that is truly relevant. In short, ClawXMemory is not trying to solve "how to stuff more history into the prompt," but "how to accurately extract and use the long-term context that actually matters."
 
 ---
 
-## 📦 Installation
+## Quick Start
 
-### Requirements
+### Installation
 
-> [!NOTE]
-> Before you start, make sure:
->
-> - Node.js `>= 24`
-> - OpenClaw `>= 2026.3.22`
-> - the `openclaw` CLI and gateway are available
-
-### Recommended: install the released package
-
-> [!TIP]
-> This is the simplest and most stable option.
+Prerequisites: OpenClaw and Node.js are already installed.
 
 ```bash
+# Install from npm
+npm install openbmb-clawxmemory
+
+# Or install from ClawHub
 openclaw plugins install clawhub:openbmb-clawxmemory
 ```
 
-The package is also published on npm:
+### Development and Debugging
 
-```bash
-npm install openbmb-clawxmemory
-```
-
-Use `openclaw plugins install clawhub:openbmb-clawxmemory` for the intended OpenClaw activation path; plain npm install is mainly useful for package inspection or custom packaging workflows.
-
-On the first install, ClawXMemory may rewrite the managed OpenClaw memory settings and request one gateway restart automatically. Wait for that restart to settle before checking the dashboard.
-
-If your OpenClaw setup uses `tools.profile: "coding"` or any explicit allowlist, you also need to expose these three chat-facing tools to the agent. Otherwise, even though the plugin is loaded, the model side will still only see `memory_search` / `memory_get`:
-
-```json
-{
-  "tools": {
-    "alsoAllow": ["memory_overview", "memory_list", "memory_flush"]
-  }
-}
-```
-
-After installation, it is recommended to inspect the status:
-
-```bash
-openclaw plugins inspect openbmb-clawxmemory --json
-```
-
-If the gateway is not running yet:
-
-```bash
-openclaw gateway start
-```
-
-### Developer mode: install from source for local debugging
-
-Use this when you need to modify code or debug the plugin locally:
+If you need to modify code or debug the plugin, install from source:
 
 ```bash
 git clone https://github.com/OpenBMB/ClawXMemory.git
@@ -90,77 +99,64 @@ npm install
 npm run relink
 ```
 
-#### What does `relink` do?
-
-`relink` automates the whole local integration flow: it builds the plugin, links it into OpenClaw, takes over the memory slot, writes the chat-facing memory tools into `tools.alsoAllow`, restarts the gateway, and performs a health check.
-
-#### Use an isolated config
-
-This avoids polluting your current OpenClaw environment:
+Common development commands. Run them in `clawxmemory/`:
 
 ```bash
-cd clawxmemory
-OPENCLAW_CONFIG_PATH=/path/to/openclaw.json npm run relink
+# Link the current repo into local OpenClaw for the first time
+npm run relink
+
+# Rebuild and reload after changing src/ or ui-source/
+npm run reload
+
+# Optional: keep compiling the plugin continuously
+npm run dev
+
+# Type checking
+npm run typecheck
+
+# Run tests
+npm run test
+
+# Debug the memory retrieval flow
+npm run debug:retrieve -- --query "project progress"
+
+# Inspect npm package contents before release
+npm run pack:check
+
+# Remove the plugin and restore native OpenClaw memory ownership
+npm run uninstall
 ```
 
-#### Daily development flow
+### Uninstall
 
-- First-time setup, switching installation mode, or clearing state
--> use `npm run relink`
-- Reloading after code-only changes
--> use `npm run reload`
-
-#### Uninstall / clean reinstall
-
-Use this when you want to hand memory ownership back to native OpenClaw before testing another install path:
+If you want to remove the plugin, run:
 
 ```bash
 npm run uninstall
 ```
 
-`npm run uninstall` restores `memory-core` as the active memory slot and removes the managed plugin config and install records. If you need a fully clean reinstall afterwards, also remove the leftover extension directory that OpenClaw may keep on disk:
+You should also manually delete the extension directory that OpenClaw may leave on disk:
 
 ```bash
 rm -rf ~/.openclaw/extensions/openbmb-clawxmemory
 ```
 
-#### Pre-publish smoke test
+### Installation Verification
 
-To validate the local source install path before publishing to ClawHub:
-
-```bash
-npm run uninstall
-rm -rf ~/.openclaw/extensions/openbmb-clawxmemory
-openclaw plugins install .
-openclaw gateway restart
-openclaw plugins inspect openbmb-clawxmemory --json
-```
-
-To validate the packaged artifact, which is closer to the real release path:
-
-```bash
-npm pack
-openclaw plugins install ./openbmb-clawxmemory-*.tgz
-openclaw gateway restart
-openclaw plugins inspect openbmb-clawxmemory --json
-```
-
-### Installation verification
-
-Run the following commands to verify plugin status:
+Run the following commands to check plugin status:
 
 ```bash
 openclaw plugins inspect openbmb-clawxmemory --json
 openclaw gateway status --json
 ```
 
-Confirm that:
+Please confirm:
 
 - `openbmb-clawxmemory` has `status: loaded`
 - `plugins.slots.memory` points to `openbmb-clawxmemory`
 - the gateway is running normally
 
-### UI access
+### UI Access
 
 Open:
 
@@ -168,9 +164,7 @@ Open:
 http://127.0.0.1:39393/clawxmemory/
 ```
 
-### Port conflicts / custom port
-
-The default UI address is `http://127.0.0.1:39393/clawxmemory/`. If port `39393` is already occupied on your machine, explicitly set `uiPort` in the OpenClaw plugin config:
+If port `39393` is already in use on your machine, explicitly set `uiPort` in the OpenClaw plugin config:
 
 ```json
 {
@@ -186,145 +180,13 @@ The default UI address is `http://127.0.0.1:39393/clawxmemory/`. If port `39393`
 }
 ```
 
-The default config file is `~/.openclaw/openclaw.json`. If you use an isolated config, for example:
-
-```bash
-cd clawxmemory
-OPENCLAW_CONFIG_PATH=/path/to/openclaw.json npm run reload
-```
-
-then edit the file pointed to by `OPENCLAW_CONFIG_PATH`, not the default config file.
-
-The same plugin config block also supports:
-
-- `uiHost`
-- `uiPathPrefix`
-
-After changing the config, run `openclaw gateway restart`, or in development run `npm run reload` / `npm run relink`. After reload, rely on the final `UI` address printed by the script; it follows the actual configured `uiHost`, `uiPort`, and `uiPathPrefix`.
-
-### Uninstall
-
-To uninstall only the plugin:
-
-```bash
-openclaw plugins uninstall openbmb-clawxmemory --force
-```
-
-> [!WARNING]
-> OpenClaw only removes the plugin installation record, load path, and slot binding. It does not automatically restore the native memory-related configuration that ClawXMemory disabled to avoid conflicts.
-
-To fully uninstall and restore native memory:
-
-```bash
-npm run uninstall
-```
-
-If you are debugging against an isolated config, you can specify it explicitly:
-
-```bash
-cd clawxmemory
-OPENCLAW_CONFIG_PATH=/path/to/openclaw.json npm run uninstall
-```
-
 ---
-
-## 🧠 How ClawXMemory Works
-
-ClawXMemory gradually turns raw conversations into a structured memory system for long-term context modeling through a combination of hierarchical memory construction and model-driven selection.
-
-For example, if you are iterating on a paper over time, each discussion is not forgotten or stored as disconnected fragments. Instead, those discussions are continuously merged into the current state of that project. When you later ask, "Where are we now?", the system answers directly from that state rather than searching through historical chat logs.
-
-### Building the multi-level memory index
-
-During memory construction, ClawXMemory takes conversations as input and automatically organizes information into structured memory in the background:
-
-| List level | Meaning |
-| ---------- | ------- |
-| **Project Memory (L2)** | Long-term project memory aggregated by topic |
-| **Time Memory (L2)** | Time-based memory aggregated by date |
-| **Memory Fragments (L1)** | Structured summaries of closed topics |
-| **Raw Conversation (L0)** | Original chat message records |
-| **Profile** | Singleton user profile record |
-
-The whole process requires no extra action: you chat as usual, the system keeps accumulating memory; you keep progressing on tasks, and the memory structure evolves with them. Short-term context handles the current response, while ClawXMemory turns those conversations into long-term context that can be reused repeatedly.
-
-<p align="center">
-  <picture>
-    <img alt="build memory index" src="./docs/image/build_en.png" width=70%>
-  </picture>
-</p>
-
-### Model-driven memory selection and reasoning
-
-The issue in many systems is not that they lack memory, but that they have retrieval without understanding. When users ask questions like "What stage is this project at now?", "How did we decide on this plan last week?", or "Didn't you know I prefer Chinese phrasing?", the challenge is not simply finding a similar text span. The real question is whether the system knows which part of memory to inspect and how deep it needs to go.
-
-ClawXMemory does not simply retrieve or concatenate history. Instead, the model actively follows the multi-level memory structure: it first checks higher-level project memory, time memory, or user profile to judge what may be relevant; only when that is insufficient does it continue locating finer-grained memory fragments, and if necessary it can trace back to concrete conversations.
-
-<p align="center">
-  <picture>
-    <img alt="memory selection and inference" src="./docs/image/inference_en.png" width=50%>
-  </picture>
-</p>
-
-The process is closer to progressively locating an answer along the memory structure than blindly searching through history. What enters the current response is no longer "as much history as possible", but only the context that is genuinely relevant to the question. In other words, ClawXMemory does not solve "how to stuff more history into the prompt"; it solves "how to use only the long-term context that actually matters."
-
----
-
-## 🛠️ Development and Debugging
-
-### Repository layout
-
-```text
-ClawXMemory/
-├── clawxmemory/
-│   ├── src/          # Core logic (most important)
-│   ├── ui-source/    # Local UI dashboard
-│   ├── tests/
-│   ├── scripts/
-│   └── openclaw.plugin.json
-└── docs/
-```
-
-### Development workflow
-
-Run these commands inside `clawxmemory/`:
-
-```bash
-# First-time link from this repo into your local OpenClaw
-npm run relink
-
-# Rebuild and reload after modifying src/ or ui-source/
-npm run reload
-
-# Optional: keep the plugin compiling continuously
-npm run dev
-
-# Type checking
-npm run typecheck
-
-# Run tests
-npm run test
-
-# Debug the memory retrieval flow
-npm run debug:retrieve -- --query "project progress"
-
-# Check npm package contents before release
-npm run pack:check
-
-# Remove the plugin and restore OpenClaw native memory ownership
-npm run uninstall
-```
-
-It is recommended to separate daily development from pre-release validation:
-
-- During local integration, prefer `relink` / `reload`; they handle build, link, config sync, and gateway restart for you.
-- Before submitting or releasing, run at least `npm run typecheck`, `npm run test`, and `npm run pack:check` once.
-- If you need to validate the install flow in an isolated environment, run `npm pack` first inside `clawxmemory/`, then do a smoke test with the generated `.tgz` via `openclaw plugins install`.
-- OpenClaw `v2026.3.28` adds a memory-plugin-owned pre-compaction memory flush contract. ClawXMemory has evaluated that change, but this release intentionally keeps host-side `agents.defaults.compaction.memoryFlush` disabled until ClawXMemory has a dedicated durable-write path for its SQLite-backed memory model.
 
 ### Contributing
 
-You can contribute through the standard flow: **Fork this repository -> open an Issue -> submit a Pull Request (PR)**.
+You can contribute through the standard process: **Fork this repository -> open an Issue -> submit a Pull Request (PR)**.
+
+If this project helps your research, a star is appreciated.
 
 ---
 
