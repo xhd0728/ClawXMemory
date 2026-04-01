@@ -207,6 +207,388 @@ describe("MemoryPluginRuntime", () => {
     runtime.stop();
   });
 
+  it("records real-turn case traces with retrieval, tool summaries, and final answer", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    (runtime as { retriever: { retrieve: ReturnType<typeof vi.fn> } }).retriever = {
+      retrieve: vi.fn().mockResolvedValue({
+        query: "我上周项目进展如何",
+        intent: "project",
+        enoughAt: "l1",
+        profile: null,
+        evidenceNote: "上周主要在推进检索链路改造。",
+        l2Results: [],
+        l1Results: [],
+        l0Results: [],
+        context: "## Evidence Note\n上周主要在推进检索链路改造。",
+        trace: {
+          traceId: "trace-1",
+          query: "我上周项目进展如何",
+          mode: "auto",
+          startedAt: "2026-04-01T00:00:00.000Z",
+          finishedAt: "2026-04-01T00:00:01.000Z",
+          steps: [
+            {
+              stepId: "trace-1:1",
+              kind: "recall_start",
+              title: "Recall Started",
+              status: "info",
+              inputSummary: "我上周项目进展如何",
+              outputSummary: "mode=auto",
+            },
+            {
+              stepId: "trace-1:2",
+              kind: "hop1_decision",
+              title: "Hop 1 Decision",
+              status: "success",
+              inputSummary: "query",
+              outputSummary: "memoryRelevant=yes",
+            },
+            {
+              stepId: "trace-1:3",
+              kind: "l2_candidates",
+              title: "L2 Candidates",
+              status: "success",
+              inputSummary: "lookup",
+              outputSummary: "project candidates",
+            },
+            {
+              stepId: "trace-1:4",
+              kind: "hop2_decision",
+              title: "Hop 2 Decision",
+              status: "success",
+              inputSummary: "l2",
+              outputSummary: "descend_l1",
+            },
+            {
+              stepId: "trace-1:5",
+              kind: "l1_candidates",
+              title: "L1 Candidates",
+              status: "success",
+              inputSummary: "l1 lookup",
+              outputSummary: "l1-1",
+            },
+            {
+              stepId: "trace-1:6",
+              kind: "hop3_decision",
+              title: "Hop 3 Decision",
+              status: "success",
+              inputSummary: "evidence",
+              outputSummary: "enoughAt=l1",
+            },
+          ],
+        },
+        debug: {
+          mode: "llm",
+          elapsedMs: 12,
+          cacheHit: false,
+          path: "auto",
+        },
+      }),
+    };
+
+    runtime.handleInternalMessageReceived({
+      type: "message",
+      action: "received",
+      sessionKey: "session-case",
+      context: {
+        content: "我上周项目进展如何",
+      },
+    } as never);
+
+    await runtime.handleBeforePromptBuild(
+      { prompt: "我上周项目进展如何", messages: [] } as never,
+      { sessionKey: "session-case" } as never,
+    );
+
+    runtime.handleBeforeToolCall(
+      {
+        toolName: "memory_search",
+        params: { query: "上周项目进展" },
+        toolCallId: "tool-1",
+      },
+      { sessionKey: "session-case" } as never,
+    );
+    runtime.handleAfterToolCall(
+      {
+        toolName: "memory_search",
+        params: { query: "上周项目进展" },
+        toolCallId: "tool-1",
+        result: { evidenceNote: "note" },
+        durationMs: 32,
+      },
+      { sessionKey: "session-case" } as never,
+    );
+
+    await runtime.handleAgentEnd(
+      {
+        success: true,
+        messages: [
+          { role: "user", content: "我上周项目进展如何" },
+          { role: "assistant", content: "上周主要在推进检索链路改造。" },
+        ],
+      } as never,
+      { sessionKey: "session-case" } as never,
+    );
+
+    const records = (runtime as never as {
+      listRecentCaseTraces: (limit: number) => Array<Record<string, unknown>>;
+    }).listRecentCaseTraces(10);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      sessionKey: "session-case",
+      query: "我上周项目进展如何",
+      status: "completed",
+      assistantReply: "上周主要在推进检索链路改造。",
+      retrieval: {
+        intent: "project",
+        enoughAt: "l1",
+        injected: true,
+        pathSummary: "l2->l1",
+        evidenceNotePreview: "上周主要在推进检索链路改造。",
+      },
+    });
+    expect((records[0]?.retrieval as { trace?: { steps?: Array<{ kind: string }> } })?.trace?.steps?.map((step) => step.kind)).toEqual([
+      "recall_start",
+      "hop1_decision",
+      "l2_candidates",
+      "hop2_decision",
+      "l1_candidates",
+      "hop3_decision",
+    ]);
+    expect((records[0]?.toolEvents as Array<Record<string, unknown>>)?.map((event) => event.phase)).toEqual(["start", "result"]);
+
+    runtime.stop();
+  });
+
+  it("marks the previous case interrupted when a new user turn arrives in the same session", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "user",
+          content: "第一个问题",
+        },
+      } as never,
+      { sessionKey: "session-interrupt" } as never,
+    );
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "user",
+          content: "第二个问题",
+        },
+      } as never,
+      { sessionKey: "session-interrupt" } as never,
+    );
+
+    const records = (runtime as never as {
+      listRecentCaseTraces: (limit: number) => Array<Record<string, unknown>>;
+    }).listRecentCaseTraces(10);
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ query: "第二个问题", status: "running" });
+    expect(records[1]).toMatchObject({ query: "第一个问题", status: "interrupted" });
+
+    runtime.stop();
+  });
+
+  it("merges control-ui metadata prompts and cleaned user messages into one case", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const retrieve = vi.fn().mockResolvedValue({
+      query: "我对于天津旅游的规划是什么",
+      intent: "time",
+      enoughAt: "l1",
+      profile: null,
+      evidenceNote: "4月1日未制定新的天津旅游规划，但已有相关天津项目在推进。",
+      l2Results: [],
+      l1Results: [],
+      l0Results: [],
+      context: "## Evidence Note\n4月1日未制定新的天津旅游规划，但已有相关天津项目在推进。",
+      trace: {
+        traceId: "trace-merge",
+        query: "我对于天津旅游的规划是什么",
+        mode: "auto",
+        startedAt: "2026-04-01T00:00:00.000Z",
+        finishedAt: "2026-04-01T00:00:01.000Z",
+        steps: [
+          {
+            stepId: "trace-merge:1",
+            kind: "recall_start",
+            title: "Recall Started",
+            status: "info",
+            inputSummary: "我对于天津旅游的规划是什么",
+            outputSummary: "mode=auto",
+          },
+        ],
+      },
+      debug: {
+        mode: "llm",
+        elapsedMs: 12,
+        cacheHit: false,
+      },
+    });
+    (runtime as { retriever: { retrieve: typeof retrieve } }).retriever = { retrieve };
+
+    await runtime.handleBeforePromptBuild(
+      {
+        prompt: [
+          "Sender (untrusted metadata):",
+          "```json",
+          "{",
+          "  \"label\": \"openclaw-control-ui\",",
+          "  \"id\": \"openclaw-control-ui\"",
+          "}",
+          "```",
+          "",
+          "[Wed 2026-04-01 15:20 GMT+8] 我对于天津旅游的规划是什么",
+        ].join("\n"),
+        messages: [],
+      } as never,
+      { sessionKey: "session-merge" } as never,
+    );
+
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "user",
+          content: "我对于天津旅游的规划是什么",
+        },
+      } as never,
+      { sessionKey: "session-merge" } as never,
+    );
+
+    await runtime.handleAgentEnd(
+      {
+        success: true,
+        messages: [
+          { role: "user", content: "我对于天津旅游的规划是什么" },
+          { role: "assistant", content: "你目前主要在推进清明假期天津穷游攻略。" },
+        ],
+      } as never,
+      { sessionKey: "session-merge" } as never,
+    );
+
+    const records = (runtime as never as {
+      listRecentCaseTraces: (limit: number) => Array<Record<string, unknown>>;
+    }).listRecentCaseTraces(10);
+    expect(records).toHaveLength(1);
+    expect(retrieve).toHaveBeenCalledWith(
+      "我对于天津旅游的规划是什么",
+      expect.objectContaining({ retrievalMode: "auto" }),
+    );
+    expect(records[0]).toMatchObject({
+      sessionKey: "session-merge",
+      query: "我对于天津旅游的规划是什么",
+      status: "completed",
+      retrieval: {
+        intent: "time",
+        enoughAt: "l1",
+        injected: true,
+      },
+    });
+    expect((records[0]?.retrieval as { trace?: { steps?: Array<{ kind: string }> } })?.trace?.steps?.map((step) => step.kind)).toEqual([
+      "recall_start",
+    ]);
+
+    runtime.stop();
+  });
+
+  it("creates a case from user message write even when retrieval data is absent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "user",
+          content: "这是一个没有触发 recall 记录的测试问题",
+        },
+      } as never,
+      { sessionKey: "session-write-only" } as never,
+    );
+
+    await runtime.handleAgentEnd(
+      {
+        success: true,
+        messages: [
+          { role: "user", content: "这是一个没有触发 recall 记录的测试问题" },
+          { role: "assistant", content: "这是最终回答。" },
+        ],
+      } as never,
+      { sessionKey: "session-write-only" } as never,
+    );
+
+    const records = (runtime as never as {
+      listRecentCaseTraces: (limit: number) => Array<Record<string, unknown>>;
+    }).listRecentCaseTraces(10);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      sessionKey: "session-write-only",
+      query: "这是一个没有触发 recall 记录的测试问题",
+      status: "completed",
+      assistantReply: "这是最终回答。",
+      retrieval: {
+        enoughAt: "none",
+        injected: false,
+      },
+    });
+    expect((records[0]?.retrieval as { trace?: { steps?: Array<{ kind: string }> } })?.trace?.steps?.map((step) => step.kind)).toEqual([
+      "recall_start",
+      "recall_skipped",
+    ]);
+
+    runtime.stop();
+  });
+
   it("sanitizes recall scaffolding when agent_end falls back to raw event messages", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
     cleanupPaths.push(dir);

@@ -147,6 +147,16 @@ function createExtractor(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function emitPromptDebug(input: { debugTrace?: (debug: Record<string, unknown>) => void } | undefined, requestLabel: string, parsedResult: unknown) {
+  input?.debugTrace?.({
+    requestLabel,
+    systemPrompt: `${requestLabel} system prompt`,
+    userPrompt: `${requestLabel} user prompt`,
+    rawResponse: JSON.stringify(parsedResult),
+    parsedResult,
+  });
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -176,6 +186,12 @@ describe("ReasoningRetriever", () => {
     expect(result.enoughAt).toBe("none");
     expect(result.context).toBe("");
     expect(result.evidenceNote).toBe("");
+    expect(result.trace?.steps.map((step) => step.kind)).toEqual([
+      "recall_start",
+      "hop1_decision",
+      "recall_skipped",
+      "context_rendered",
+    ]);
   });
 
   it("returns profile-only context for base_only queries", async () => {
@@ -321,23 +337,39 @@ describe("ReasoningRetriever", () => {
       getL0ByIds: vi.fn().mockImplementation((ids: string[]) => [l0A, l0B, l0C].filter((item) => ids.includes(item.l0IndexId))),
     });
     const extractor = createExtractor({
-      decideMemoryLookup: vi.fn().mockResolvedValue({
-        memoryRelevant: true,
-        baseOnly: false,
-        lookupQueries: [{ targetTypes: ["time", "project"], lookupQuery: "最近一周 ClawXMemory 进展", timeRange: { startDate: "2026-03-31", endDate: "2026-03-31" } }],
+      decideMemoryLookup: vi.fn().mockImplementation(async (input: { debugTrace?: (debug: Record<string, unknown>) => void }) => {
+        const parsed = {
+          memoryRelevant: true,
+          baseOnly: false,
+          lookupQueries: [{ targetTypes: ["time", "project"], lookupQuery: "最近一周 ClawXMemory 进展", timeRange: { startDate: "2026-03-31", endDate: "2026-03-31" } }],
+        };
+        emitPromptDebug(input, "Hop1 lookup", parsed);
+        return parsed;
       }),
-      selectL2FromCatalog: vi.fn().mockResolvedValue({
-        intent: "general",
-        evidenceNote: "L2 note",
-        enoughAt: "descend_l1",
+      selectL2FromCatalog: vi.fn().mockImplementation(async (input: { debugTrace?: (debug: Record<string, unknown>) => void }) => {
+        const parsed = {
+          intent: "general",
+          evidenceNote: "L2 note",
+          enoughAt: "descend_l1",
+        };
+        emitPromptDebug(input, "Hop2 L2 selection", parsed);
+        return parsed;
       }),
-      selectL1FromEvidence: vi.fn().mockResolvedValue({
-        evidenceNote: "L1 note",
-        enoughAt: "descend_l0",
+      selectL1FromEvidence: vi.fn().mockImplementation(async (input: { debugTrace?: (debug: Record<string, unknown>) => void }) => {
+        const parsed = {
+          evidenceNote: "L1 note",
+          enoughAt: "descend_l0",
+        };
+        emitPromptDebug(input, "Hop3 L1 selection", parsed);
+        return parsed;
       }),
-      selectL0FromEvidence: vi.fn().mockResolvedValue({
-        evidenceNote: "Final note with exact conversation details.",
-        enoughAt: "l0",
+      selectL0FromEvidence: vi.fn().mockImplementation(async (input: { debugTrace?: (debug: Record<string, unknown>) => void }) => {
+        const parsed = {
+          evidenceNote: "Final note with exact conversation details.",
+          enoughAt: "l0",
+        };
+        emitPromptDebug(input, "Hop4 L0 selection", parsed);
+        return parsed;
       }),
     });
 
@@ -355,6 +387,26 @@ describe("ReasoningRetriever", () => {
     expect(result.l0Results.map((item) => item.item.l0IndexId)).toEqual(["l0-3", "l0-2"]);
     expect(result.evidenceNote).toContain("exact conversation details");
     expect(result.context).toContain("Evidence Note");
+    expect(result.trace?.steps.map((step) => step.kind)).toEqual([
+      "recall_start",
+      "hop1_decision",
+      "l2_candidates",
+      "hop2_decision",
+      "l1_candidates",
+      "hop3_decision",
+      "l0_candidates",
+      "hop4_decision",
+      "context_rendered",
+    ]);
+    expect(result.trace?.steps.find((step) => step.kind === "hop2_decision")?.details?.length).toBeGreaterThan(0);
+    expect(result.trace?.steps.find((step) => step.kind === "hop4_decision")?.promptDebug).toMatchObject({
+      requestLabel: "Hop4 L0 selection",
+      systemPrompt: expect.stringContaining("Hop4 L0 selection"),
+      userPrompt: expect.stringContaining("Hop4 L0 selection"),
+      parsedResult: expect.objectContaining({
+        enoughAt: "l0",
+      }),
+    });
   });
 
   it("continues descending when hop2 and hop3 return none in accuracy_first mode", async () => {
@@ -507,5 +559,13 @@ describe("ReasoningRetriever", () => {
     expect(result.l0Results).toEqual([]);
     expect(result.debug?.corrections).toContain("hop2_unverified_shallow_stop");
     expect((extractor.selectL1FromEvidence as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(result.trace?.steps.map((step) => step.kind)).toEqual([
+      "recall_start",
+      "hop1_decision",
+      "l2_candidates",
+      "hop2_decision",
+      "fallback_applied",
+      "context_rendered",
+    ]);
   });
 });

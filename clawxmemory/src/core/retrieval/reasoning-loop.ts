@@ -6,6 +6,10 @@ import type {
   L1SearchResult,
   L1WindowRecord,
   L2SearchResult,
+  RetrievalPromptDebug,
+  RetrievalTraceDetail,
+  RetrievalTrace,
+  RetrievalTraceStep,
   RetrievalResult,
   RecallMode,
 } from "../types.js";
@@ -15,6 +19,7 @@ import {
   type LookupQuerySpec,
 } from "../skills/llm-extraction.js";
 import { MemoryRepository } from "../storage/sqlite.js";
+import { hashText, nowIso } from "../utils/id.js";
 import { truncate } from "../utils/text.js";
 import type { SkillsRuntime } from "../skills/types.js";
 
@@ -156,6 +161,251 @@ function isTimeoutError(error: unknown): boolean {
 
 function withDebug(result: RetrievalResult, debug: RetrievalResult["debug"]): RetrievalResult {
   return debug ? { ...result, debug } : result;
+}
+
+function buildTraceId(prefix: string, seed: string): string {
+  return `${prefix}_${hashText(`${seed}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`)}`;
+}
+
+function previewText(value: string, max = 220): string {
+  return truncate(value.trim(), max);
+}
+
+function asDisplayText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function textDetail(key: string, label: string, text: string): RetrievalTraceDetail {
+  return { key, label, kind: "text", text };
+}
+
+function noteDetail(key: string, label: string, text: string): RetrievalTraceDetail {
+  return { key, label, kind: "note", text };
+}
+
+function listDetail(key: string, label: string, items: string[]): RetrievalTraceDetail {
+  return { key, label, kind: "list", items };
+}
+
+function kvDetail(
+  key: string,
+  label: string,
+  entries: Array<{ label: string; value: unknown }>,
+): RetrievalTraceDetail {
+  return {
+    key,
+    label,
+    kind: "kv",
+    entries: entries
+      .map((entry) => ({ label: entry.label, value: asDisplayText(entry.value) }))
+      .filter((entry) => entry.value),
+  };
+}
+
+function jsonDetail(key: string, label: string, json: unknown): RetrievalTraceDetail {
+  return { key, label, kind: "json", json };
+}
+
+function describeL2Result(hit: L2SearchResult): string {
+  return hit.level === "l2_time"
+    ? `${hit.item.l2IndexId} · ${hit.item.dateKey} · ${previewText(hit.item.summary, 180)}`
+    : `${hit.item.l2IndexId} · ${hit.item.projectName} · status=${hit.item.currentStatus} · ${previewText(hit.item.latestProgress || hit.item.summary, 180)}`;
+}
+
+function describeL1Result(item: L1WindowRecord): string {
+  const projects = item.projectDetails.map((project) => project.name).filter(Boolean).slice(0, 4).join(", ");
+  return `${item.l1IndexId} · ${item.timePeriod} · ${previewText(item.summary, 140)}${projects ? ` · projects=${projects}` : ""}`;
+}
+
+function describeL0Result(item: L0SessionRecord): string {
+  const preview = item.messages.slice(-2).map((message) => `${message.role}: ${previewText(message.content, 120)}`).join(" | ");
+  return `${item.l0IndexId} · ${item.timestamp}${preview ? ` · ${preview}` : ""}`;
+}
+
+function buildLookupQueryItems(lookupQueries: LookupQuerySpec[]): string[] {
+  return lookupQueries.map((entry) => {
+    const route = entry.targetTypes.join("+") || "time+project";
+    const range = entry.timeRange ? ` [${entry.timeRange.startDate}..${entry.timeRange.endDate}]` : "";
+    return `${route} · ${entry.lookupQuery || "(same as query)"}${range}`;
+  });
+}
+
+function summarizeLookupQueries(lookupQueries: LookupQuerySpec[]): string {
+  if (lookupQueries.length === 0) return "No structured lookup queries.";
+  return lookupQueries
+    .map((entry) => {
+      const route = entry.targetTypes.join("+") || "time+project";
+      const range = entry.timeRange ? ` [${entry.timeRange.startDate}..${entry.timeRange.endDate}]` : "";
+      return `${route}: ${entry.lookupQuery || "(same as query)"}${range}`;
+    })
+    .join(" | ");
+}
+
+function summarizeL2Results(results: L2SearchResult[]): string {
+  if (results.length === 0) return "No L2 candidates.";
+  return results
+    .map((hit) => hit.level === "l2_time"
+      ? `${hit.item.dateKey}`
+      : `${hit.item.projectName} (${hit.item.currentStatus})`)
+    .join(" | ");
+}
+
+function summarizeL1Windows(results: L1WindowRecord[]): string {
+  if (results.length === 0) return "No L1 candidates.";
+  return results.map((item) => `${item.l1IndexId} · ${item.timePeriod}`).join(" | ");
+}
+
+function summarizeL0Sessions(results: L0SessionRecord[]): string {
+  if (results.length === 0) return "No L0 candidates.";
+  return results.map((item) => `${item.l0IndexId} · ${item.timestamp}`).join(" | ");
+}
+
+function createRetrievalTrace(query: string, mode: "auto" | "explicit"): RetrievalTrace {
+  const startedAt = nowIso();
+  return {
+    traceId: buildTraceId("trace", `${mode}:${query}`),
+    query,
+    mode,
+    startedAt,
+    finishedAt: startedAt,
+    steps: [],
+  };
+}
+
+function appendTraceStep(
+  trace: RetrievalTrace,
+  step: Omit<RetrievalTraceStep, "stepId">,
+): void {
+  trace.steps.push({
+    ...step,
+    stepId: `${trace.traceId}:step:${trace.steps.length + 1}`,
+  });
+}
+
+function finishTrace(trace: RetrievalTrace): RetrievalTrace {
+  return {
+    ...trace,
+    finishedAt: nowIso(),
+    steps: trace.steps.map((step) => ({
+      ...step,
+      ...(step.refs ? { refs: { ...step.refs } } : {}),
+      ...(step.metrics ? { metrics: { ...step.metrics } } : {}),
+      ...(step.details ? { details: structuredClone(step.details) } : {}),
+      ...(step.promptDebug ? { promptDebug: structuredClone(step.promptDebug) } : {}),
+    })),
+  };
+}
+
+function attachTrace(result: RetrievalResult, trace: RetrievalTrace): RetrievalResult {
+  return {
+    ...result,
+    trace: finishTrace(trace),
+  };
+}
+
+function summarizeCorrections(corrections: string[] | undefined): string {
+  if (!corrections || corrections.length === 0) return "No corrections.";
+  return corrections.join(" | ");
+}
+
+function appendContextRenderedStep(trace: RetrievalTrace, result: RetrievalResult): void {
+  const injected = Boolean(result.context.trim());
+  appendTraceStep(trace, {
+    kind: "context_rendered",
+    title: "Context Rendered",
+    status: injected ? "success" : "skipped",
+    inputSummary: `intent=${result.intent} · enoughAt=${result.enoughAt}`,
+    outputSummary: injected
+      ? `Injected ${result.context.length} chars. ${previewText(result.context, 260)}`
+      : "No context injected.",
+    refs: {
+      intent: result.intent,
+      enoughAt: result.enoughAt,
+      injected,
+    },
+    metrics: {
+      contextChars: result.context.length,
+      l2Count: result.l2Results.length,
+      l1Count: result.l1Results.length,
+      l0Count: result.l0Results.length,
+    },
+    details: [
+      kvDetail("final-state", "Final State", [
+        { label: "intent", value: result.intent },
+        { label: "enoughAt", value: result.enoughAt },
+        { label: "injected", value: injected ? "true" : "false" },
+      ]),
+      ...(result.evidenceNote.trim() ? [noteDetail("final-note", "Final Evidence Note", result.evidenceNote)] : []),
+      ...(injected ? [textDetail("context-preview", "Injected Context Preview", result.context)] : []),
+      kvDetail("level-counts", "Rendered Evidence Counts", [
+        { label: "L2", value: result.l2Results.length },
+        { label: "L1", value: result.l1Results.length },
+        { label: "L0", value: result.l0Results.length },
+      ]),
+    ],
+  });
+}
+
+function appendRecallSkippedStep(
+  trace: RetrievalTrace,
+  reason: string,
+  outputSummary: string,
+  refs?: Record<string, unknown>,
+): void {
+  appendTraceStep(trace, {
+    kind: "recall_skipped",
+    title: "Recall Skipped",
+    status: "skipped",
+    inputSummary: `reason=${reason}`,
+    outputSummary,
+    ...(refs ? { refs } : {}),
+    details: [
+      kvDetail("skip-reason", "Skip Reason", [
+        { label: "reason", value: reason },
+      ]),
+      ...(refs ? [jsonDetail("skip-refs", "Skip Metadata", refs)] : []),
+    ],
+  });
+}
+
+function appendFallbackStep(
+  trace: RetrievalTrace,
+  corrections: string[],
+  result: RetrievalResult,
+): void {
+  appendTraceStep(trace, {
+    kind: "fallback_applied",
+    title: "Fallback Applied",
+    status: "warning",
+    inputSummary: summarizeCorrections(corrections),
+    outputSummary: previewText(result.evidenceNote || result.context || "No fallback evidence.", 260),
+    refs: {
+      enoughAt: result.enoughAt,
+      corrections,
+    },
+    metrics: {
+      l2Count: result.l2Results.length,
+      l1Count: result.l1Results.length,
+      l0Count: result.l0Results.length,
+    },
+    details: [
+      listDetail("fallback-corrections", "Fallback Reasons", corrections),
+      ...(result.evidenceNote.trim() ? [noteDetail("fallback-note", "Fallback Evidence Note", result.evidenceNote)] : []),
+      kvDetail("fallback-levels", "Fallback Result", [
+        { label: "enoughAt", value: result.enoughAt },
+        { label: "L2", value: result.l2Results.length },
+        { label: "L1", value: result.l1Results.length },
+        { label: "L0", value: result.l0Results.length },
+      ]),
+    ],
+  });
 }
 
 function uniqueById<T>(items: T[], getId: (item: T) => string): T[] {
@@ -657,16 +907,72 @@ export class ReasoningRetriever {
     const startedAt = Date.now();
     const settings = this.currentSettings();
     const limits = this.resolveRecallLimits(settings, options);
+    const trace = createRetrievalTrace(query, execution.retrievalMode);
+    let hop1PromptDebug: RetrievalPromptDebug | undefined;
+    let hop2PromptDebug: RetrievalPromptDebug | undefined;
+    let hop3PromptDebug: RetrievalPromptDebug | undefined;
+    let hop4PromptDebug: RetrievalPromptDebug | undefined;
+    appendTraceStep(trace, {
+      kind: "recall_start",
+      title: "Recall Started",
+      status: "info",
+      inputSummary: previewText(query, 220),
+      outputSummary: `mode=${execution.retrievalMode} · reasoning=${settings.reasoningMode} · limits=${limits.l2}/${limits.l1}/${limits.l0}`,
+      refs: {
+        retrievalMode: execution.retrievalMode,
+        reasoningMode: settings.reasoningMode,
+      },
+      metrics: {
+        l2Limit: limits.l2,
+        l1Limit: limits.l1,
+        l0Limit: limits.l0,
+      },
+      details: [
+        kvDetail("recall-config", "Recall Configuration", [
+          { label: "query", value: query },
+          { label: "retrievalMode", value: execution.retrievalMode },
+          { label: "reasoningMode", value: settings.reasoningMode },
+          { label: "l2Limit", value: limits.l2 },
+          { label: "l1Limit", value: limits.l1 },
+          { label: "l0Limit", value: limits.l0 },
+        ]),
+      ],
+    });
     const cacheKey = this.buildCacheKey(query, settings, execution.retrievalMode);
     const cached = this.getCachedResult(cacheKey);
     if (cached) {
-      return this.finalizeResult(withDebug(cached, {
+      const result = withDebug(cached, {
         ...(cached.debug ?? {}),
         mode: cached.debug?.mode ?? "llm",
         elapsedMs: Date.now() - startedAt,
         cacheHit: true,
         path: execution.retrievalMode,
-      }), execution, cacheKey, false);
+      });
+      appendTraceStep(trace, {
+        kind: "cache_hit",
+        title: "Cache Hit",
+        status: "success",
+        inputSummary: "Used cached retrieval result for this query snapshot.",
+        outputSummary: `intent=${result.intent} · enoughAt=${result.enoughAt} · mode=${result.debug?.mode ?? "llm"}`,
+        refs: {
+          enoughAt: result.enoughAt,
+          intent: result.intent,
+        },
+        metrics: {
+          cacheHit: 1,
+          elapsedMs: Date.now() - startedAt,
+        },
+        details: [
+          kvDetail("cache-summary", "Cached Result", [
+            { label: "intent", value: result.intent },
+            { label: "enoughAt", value: result.enoughAt },
+            { label: "mode", value: result.debug?.mode ?? "llm" },
+          ]),
+          ...(result.evidenceNote.trim() ? [noteDetail("cache-note", "Cached Evidence Note", result.evidenceNote)] : []),
+        ],
+      });
+      appendContextRenderedStep(trace, result);
+      return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
     }
 
     const baseProfile = this.getBaseProfile(options.includeFacts);
@@ -674,15 +980,51 @@ export class ReasoningRetriever {
     if (execution.retrievalMode === "auto" && this.runtime.isBackgroundBusy?.()) {
       const fallbackCandidates = this.buildLocalFallbackCandidates(query, limits.l2, baseProfile);
       const fallback = this.buildLocalFallback(query, fallbackCandidates, execution, Date.now() - startedAt, false, ["background_busy", "fallback"]);
-      return this.finalizeResult(fallback, execution, cacheKey, false);
+      appendFallbackStep(trace, ["background_busy", "fallback"], fallback);
+      appendContextRenderedStep(trace, fallback);
+      return this.finalizeResult(attachTrace(fallback, trace), execution, cacheKey, false);
     }
 
     try {
       const hop1 = await this.extractor.decideMemoryLookup({
         query,
         profile: baseProfile,
+        debugTrace: (debug) => {
+          hop1PromptDebug = debug;
+        },
       });
       const routedFallbackCandidates = this.buildLocalFallbackCandidates(query, limits.l2, baseProfile, hop1.lookupQueries);
+      appendTraceStep(trace, {
+        kind: "hop1_decision",
+        title: "Hop 1 Decision",
+        status: "success",
+        inputSummary: baseProfile?.profileText.trim()
+          ? `profile_available=1 · ${previewText(query, 160)}`
+          : previewText(query, 160),
+        outputSummary: [
+          `memoryRelevant=${hop1.memoryRelevant ? "yes" : "no"}`,
+          `baseOnly=${hop1.baseOnly ? "yes" : "no"}`,
+          summarizeLookupQueries(hop1.lookupQueries),
+        ].join(" · "),
+        refs: {
+          memoryRelevant: hop1.memoryRelevant,
+          baseOnly: hop1.baseOnly,
+          lookupQueries: hop1.lookupQueries,
+        },
+        details: [
+          kvDetail("hop1-decision", "Hop 1 Decision", [
+            { label: "memoryRelevant", value: hop1.memoryRelevant ? "true" : "false" },
+            { label: "baseOnly", value: hop1.baseOnly ? "true" : "false" },
+          ]),
+          ...(hop1.lookupQueries.length > 0 ? [listDetail("hop1-queries", "Lookup Queries", buildLookupQueryItems(hop1.lookupQueries))] : []),
+          jsonDetail("hop1-json", "Hop 1 Structured Result", {
+            memoryRelevant: hop1.memoryRelevant,
+            baseOnly: hop1.baseOnly,
+            lookupQueries: hop1.lookupQueries,
+          }),
+        ],
+        ...(hop1PromptDebug ? { promptDebug: hop1PromptDebug } : {}),
+      });
 
       if (!hop1.memoryRelevant) {
         const result = withDebug({
@@ -706,7 +1048,14 @@ export class ReasoningRetriever {
             lookupQuery: entry.lookupQuery,
           })),
         });
-        return this.finalizeResult(result, execution, cacheKey, false);
+        appendRecallSkippedStep(
+          trace,
+          "memory_not_relevant",
+          "Hop 1 judged that memory recall is unnecessary for this query.",
+          { hop1BaseOnly: hop1.baseOnly },
+        );
+        appendContextRenderedStep(trace, result);
+        return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
       if (hop1.baseOnly) {
@@ -733,7 +1082,8 @@ export class ReasoningRetriever {
             lookupQuery: entry.lookupQuery,
           })),
         });
-        return this.finalizeResult(result, execution, cacheKey, false);
+        appendContextRenderedStep(trace, result);
+        return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
       const catalog = this.buildL2Catalog(query, hop1.lookupQueries, limits.l2);
@@ -743,10 +1093,34 @@ export class ReasoningRetriever {
           return hit ? { ...hit, score: toRankScore(index) } : undefined;
         })
         .filter((hit): hit is L2SearchResult => Boolean(hit));
+      appendTraceStep(trace, {
+        kind: "l2_candidates",
+        title: "L2 Candidates",
+        status: l2Results.length > 0 ? "success" : "warning",
+        inputSummary: summarizeLookupQueries(hop1.lookupQueries),
+        outputSummary: summarizeL2Results(l2Results),
+        refs: {
+          l2Ids: l2Results.map((item) => item.item.l2IndexId),
+          catalogTruncated: catalog.truncated,
+        },
+        metrics: {
+          count: l2Results.length,
+          truncated: catalog.truncated ? 1 : 0,
+        },
+        details: [
+          kvDetail("l2-summary", "L2 Candidate Summary", [
+            { label: "count", value: l2Results.length },
+            { label: "catalogTruncated", value: catalog.truncated ? "true" : "false" },
+          ]),
+          ...(l2Results.length > 0 ? [listDetail("l2-items", "L2 Candidates", l2Results.map(describeL2Result))] : []),
+        ],
+      });
 
       if (l2Results.length === 0) {
         const fallback = this.buildLocalFallback(query, routedFallbackCandidates, execution, Date.now() - startedAt, false, ["catalog_empty", "fallback"]);
-        return this.finalizeResult(fallback, execution, cacheKey, false);
+        appendFallbackStep(trace, ["catalog_empty", "fallback"], fallback);
+        appendContextRenderedStep(trace, fallback);
+        return this.finalizeResult(attachTrace(fallback, trace), execution, cacheKey, false);
       }
 
       const hop2 = await this.extractor.selectL2FromCatalog({
@@ -755,6 +1129,9 @@ export class ReasoningRetriever {
         lookupQueries: hop1.lookupQueries,
         l2Entries: catalog.entries,
         catalogTruncated: catalog.truncated,
+        debugTrace: (debug) => {
+          hop2PromptDebug = debug;
+        },
       });
       const hop2Note = hop2.evidenceNote.trim() || this.buildFallbackEvidenceNote(l2Results, query);
       const shallowMode = this.shouldStayShallow(settings, execution.retrievalMode);
@@ -763,6 +1140,28 @@ export class ReasoningRetriever {
         lookupQuery: entry.lookupQuery,
       }));
       const hop2SelectedL2Ids = l2Results.map((item) => item.item.l2IndexId);
+      appendTraceStep(trace, {
+        kind: "hop2_decision",
+        title: "Hop 2 Decision",
+        status: hop2.enoughAt === "none" ? "warning" : "success",
+        inputSummary: summarizeL2Results(l2Results),
+        outputSummary: `intent=${hop2.intent} · enoughAt=${hop2.enoughAt} · ${previewText(hop2Note, 220)}`,
+        refs: {
+          enoughAt: hop2.enoughAt,
+          intent: hop2.intent,
+          selectedL2Ids: hop2SelectedL2Ids,
+        },
+        details: [
+          kvDetail("hop2-result", "Hop 2 Result", [
+            { label: "intent", value: hop2.intent },
+            { label: "enoughAt", value: hop2.enoughAt },
+          ]),
+          noteDetail("hop2-note-before", "Evidence Note Before Hop 2", "(empty)"),
+          noteDetail("hop2-note-after", "Evidence Note After Hop 2", hop2Note),
+          listDetail("hop2-selected-l2", "Selected L2 IDs", hop2SelectedL2Ids),
+        ],
+        ...(hop2PromptDebug ? { promptDebug: hop2PromptDebug } : {}),
+      });
 
       if (shallowMode) {
         const enoughAt = coerceEnoughAt("l2", { l2: l2Results.length, l1: 0, l0: 0 });
@@ -789,7 +1188,11 @@ export class ReasoningRetriever {
           catalogTruncated: catalog.truncated,
           ...(corrections.length > 0 ? { corrections } : {}),
         });
-        return this.finalizeResult(result, execution, cacheKey, false);
+        if (corrections.length > 0) {
+          appendFallbackStep(trace, corrections, result);
+        }
+        appendContextRenderedStep(trace, result);
+        return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
       if (hop2.enoughAt === "l2") {
@@ -815,10 +1218,30 @@ export class ReasoningRetriever {
           hop2SelectedL2Ids,
           catalogTruncated: catalog.truncated,
         });
-        return this.finalizeResult(result, execution, cacheKey, false);
+        appendContextRenderedStep(trace, result);
+        return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
       const l1Candidates = this.buildL1CandidatesFromL2(l2Results, limits.l1);
+      appendTraceStep(trace, {
+        kind: "l1_candidates",
+        title: "L1 Candidates",
+        status: l1Candidates.length > 0 ? "success" : "warning",
+        inputSummary: hop2SelectedL2Ids.join(" | ") || "No selected L2 ids.",
+        outputSummary: summarizeL1Windows(l1Candidates),
+        refs: {
+          l1Ids: l1Candidates.map((item) => item.l1IndexId),
+        },
+        metrics: {
+          count: l1Candidates.length,
+        },
+        details: [
+          kvDetail("l1-summary", "L1 Candidate Summary", [
+            { label: "count", value: l1Candidates.length },
+          ]),
+          ...(l1Candidates.length > 0 ? [listDetail("l1-items", "L1 Candidates", l1Candidates.map(describeL1Result))] : []),
+        ],
+      });
       if (l1Candidates.length === 0) {
         const enoughAt = coerceEnoughAt("l2", { l2: l2Results.length, l1: 0, l0: 0 });
         const result = withDebug({
@@ -843,7 +1266,9 @@ export class ReasoningRetriever {
           catalogTruncated: catalog.truncated,
           corrections: ["missing_l1_candidates"],
         });
-        return this.finalizeResult(result, execution, cacheKey, false);
+        appendFallbackStep(trace, ["missing_l1_candidates"], result);
+        appendContextRenderedStep(trace, result);
+        return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
       const hop3 = await this.extractor.selectL1FromEvidence({
@@ -851,9 +1276,32 @@ export class ReasoningRetriever {
         evidenceNote: hop2Note,
         selectedL2Entries: catalog.entries,
         l1Windows: l1Candidates,
+        debugTrace: (debug) => {
+          hop3PromptDebug = debug;
+        },
       });
       const l1Results = this.buildL1Results(l1Candidates);
       const hop3Note = hop3.evidenceNote.trim() || hop2Note;
+      appendTraceStep(trace, {
+        kind: "hop3_decision",
+        title: "Hop 3 Decision",
+        status: hop3.enoughAt === "none" ? "warning" : "success",
+        inputSummary: previewText(hop2Note, 220),
+        outputSummary: `enoughAt=${hop3.enoughAt} · ${previewText(hop3Note, 220)}`,
+        refs: {
+          enoughAt: hop3.enoughAt,
+          selectedL1Ids: l1Results.map((item) => item.item.l1IndexId),
+        },
+        details: [
+          kvDetail("hop3-result", "Hop 3 Result", [
+            { label: "enoughAt", value: hop3.enoughAt },
+          ]),
+          noteDetail("hop3-note-before", "Evidence Note Before Hop 3", hop2Note),
+          noteDetail("hop3-note-after", "Evidence Note After Hop 3", hop3Note),
+          listDetail("hop3-selected-l1", "Selected L1 IDs", l1Results.map((item) => item.item.l1IndexId)),
+        ],
+        ...(hop3PromptDebug ? { promptDebug: hop3PromptDebug } : {}),
+      });
 
       if (hop3.enoughAt === "l1") {
         const enoughAt = coerceEnoughAt("l1", { l2: l2Results.length, l1: l1Results.length, l0: 0 });
@@ -880,10 +1328,30 @@ export class ReasoningRetriever {
           hop3SelectedL1Ids: l1Results.map((item) => item.item.l1IndexId),
           catalogTruncated: catalog.truncated,
         });
-        return this.finalizeResult(result, execution, cacheKey, false);
+        appendContextRenderedStep(trace, result);
+        return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
       const l0Candidates = this.buildL0CandidatesFromL1(l1Candidates, limits.l0);
+      appendTraceStep(trace, {
+        kind: "l0_candidates",
+        title: "L0 Candidates",
+        status: l0Candidates.length > 0 ? "success" : "warning",
+        inputSummary: l1Results.map((item) => item.item.l1IndexId).join(" | ") || "No selected L1 ids.",
+        outputSummary: summarizeL0Sessions(l0Candidates),
+        refs: {
+          l0Ids: l0Candidates.map((item) => item.l0IndexId),
+        },
+        metrics: {
+          count: l0Candidates.length,
+        },
+        details: [
+          kvDetail("l0-summary", "L0 Candidate Summary", [
+            { label: "count", value: l0Candidates.length },
+          ]),
+          ...(l0Candidates.length > 0 ? [listDetail("l0-items", "L0 Candidates", l0Candidates.map(describeL0Result))] : []),
+        ],
+      });
       if (l0Candidates.length === 0) {
         const enoughAt = coerceEnoughAt("l1", { l2: l2Results.length, l1: l1Results.length, l0: 0 });
         const result = withDebug({
@@ -910,7 +1378,9 @@ export class ReasoningRetriever {
           catalogTruncated: catalog.truncated,
           corrections: ["missing_l0_candidates"],
         });
-        return this.finalizeResult(result, execution, cacheKey, false);
+        appendFallbackStep(trace, ["missing_l0_candidates"], result);
+        appendContextRenderedStep(trace, result);
+        return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
       const hop4 = await this.extractor.selectL0FromEvidence({
@@ -919,6 +1389,9 @@ export class ReasoningRetriever {
         selectedL2Entries: catalog.entries,
         selectedL1Windows: l1Candidates,
         l0Sessions: l0Candidates,
+        debugTrace: (debug) => {
+          hop4PromptDebug = debug;
+        },
       });
       const l0Results = this.buildL0Results(l0Candidates);
       const finalNote = hop4.evidenceNote.trim() || hop3Note;
@@ -926,6 +1399,26 @@ export class ReasoningRetriever {
       const finalEnoughAt = useL0Results
         ? coerceEnoughAt("l0", { l2: l2Results.length, l1: l1Results.length, l0: l0Results.length })
         : coerceEnoughAt("l1", { l2: l2Results.length, l1: l1Results.length, l0: 0 });
+      appendTraceStep(trace, {
+        kind: "hop4_decision",
+        title: "Hop 4 Decision",
+        status: hop4.enoughAt === "none" ? "warning" : "success",
+        inputSummary: previewText(hop3Note, 220),
+        outputSummary: `enoughAt=${hop4.enoughAt} · ${previewText(finalNote, 220)}`,
+        refs: {
+          enoughAt: hop4.enoughAt,
+          selectedL0Ids: useL0Results ? l0Results.map((item) => item.item.l0IndexId) : [],
+        },
+        details: [
+          kvDetail("hop4-result", "Hop 4 Result", [
+            { label: "enoughAt", value: hop4.enoughAt },
+          ]),
+          noteDetail("hop4-note-before", "Evidence Note Before Hop 4", hop3Note),
+          noteDetail("hop4-note-after", "Evidence Note After Hop 4", finalNote),
+          ...(useL0Results ? [listDetail("hop4-selected-l0", "Selected L0 IDs", l0Results.map((item) => item.item.l0IndexId))] : []),
+        ],
+        ...(hop4PromptDebug ? { promptDebug: hop4PromptDebug } : {}),
+      });
       const result = withDebug({
         query,
         intent: hop2.intent,
@@ -950,12 +1443,15 @@ export class ReasoningRetriever {
         hop4SelectedL0Ids: useL0Results ? l0Results.map((item) => item.item.l0IndexId) : [],
         catalogTruncated: catalog.truncated,
       });
-      return this.finalizeResult(result, execution, cacheKey, false);
+      appendContextRenderedStep(trace, result);
+      return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
     } catch (error) {
       const timedOut = isTimeoutError(error);
       const fallbackCandidates = this.buildLocalFallbackCandidates(query, limits.l2, baseProfile);
       const fallback = this.buildLocalFallback(query, fallbackCandidates, execution, Date.now() - startedAt, false, ["error", "fallback"]);
-      return this.finalizeResult(fallback, execution, cacheKey, timedOut);
+      appendFallbackStep(trace, ["error", "fallback"], fallback);
+      appendContextRenderedStep(trace, fallback);
+      return this.finalizeResult(attachTrace(fallback, trace), execution, cacheKey, timedOut);
     }
   }
 

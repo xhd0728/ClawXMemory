@@ -4,12 +4,23 @@ import { LocalUiServer } from "../src/ui-server.js";
 
 const activeServers: LocalUiServer[] = [];
 
-async function startUiServer(): Promise<string> {
+async function startUiServer(controls: Record<string, unknown> = {}): Promise<string> {
   const uiServer = new LocalUiServer(
     {} as never,
     {} as never,
     { host: "127.0.0.1", port: 0, prefix: "/clawxmemory" },
-    {} as never,
+    {
+      getSettings: () => ({ reasoningMode: "answer_first", recallTopK: 10 }),
+      saveSettings: () => ({ reasoningMode: "answer_first", recallTopK: 10 }),
+      runIndexNow: async () => ({ l0Captured: 0, l1Created: 0, l2TimeUpdated: 0, l2ProjectUpdated: 0, profileUpdated: 0, failed: 0 }),
+      exportMemoryBundle: () => ({ exportedAt: "2026-04-01T00:00:00.000Z" }),
+      importMemoryBundle: async () => ({ imported: {} }),
+      getRuntimeOverview: () => ({ queuedSessions: 0, lastRecallMs: 0, recallTimeouts: 0, lastRecallMode: "none", currentReasoningMode: "answer_first" }),
+      getStartupRepairSnapshot: () => undefined,
+      listCaseTraces: () => [],
+      getCaseTrace: () => undefined,
+      ...controls,
+    } as never,
     {},
   );
   activeServers.push(uiServer);
@@ -58,6 +69,12 @@ describe("LocalUiServer static assets", () => {
     const html = await response.text();
     expect(html).toContain('rel="icon"');
     expect(html).toContain("./assets/brand/logo.png");
+    expect(html).toContain('data-board="memory_trace"');
+    expect(html).toContain('id="memoryTraceBoard"');
+    expect(html).toContain('data-level="memory_trace"');
+    expect(html.indexOf('data-board="profile"')).toBeLessThan(html.indexOf('data-board="memory_trace"'));
+    expect(html.indexOf('data-level="profile"')).toBeLessThan(html.indexOf('data-level="memory_trace"'));
+    expect(html).not.toContain('id="retrievePanel"');
     expect(html).not.toContain(">CX<");
     expect(html).not.toContain(">Memory<");
   });
@@ -95,5 +112,49 @@ describe("LocalUiServer static assets", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("plugins.entries.openbmb-clawxmemory.config.uiPort"));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("~/.openclaw/openclaw.json"));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("OPENCLAW_CONFIG_PATH"));
+  });
+
+  it("serves recent case traces and removes the old retrieve endpoint", async () => {
+    const caseRecord = {
+      caseId: "case-1",
+      sessionKey: "session-a",
+      query: "我上周项目进展如何",
+      startedAt: "2026-04-01T00:00:00.000Z",
+      finishedAt: "2026-04-01T00:00:02.000Z",
+      status: "completed",
+      toolEvents: [],
+      assistantReply: "上周主要在推进检索链路改造。",
+      retrieval: {
+        intent: "project",
+        enoughAt: "l1",
+        injected: true,
+        contextPreview: "## Evidence Note",
+        evidenceNotePreview: "上周主要在推进检索链路改造。",
+        pathSummary: "l2->l1",
+        trace: {
+          traceId: "trace-1",
+          query: "我上周项目进展如何",
+          mode: "auto",
+          startedAt: "2026-04-01T00:00:00.000Z",
+          finishedAt: "2026-04-01T00:00:01.000Z",
+          steps: [],
+        },
+      },
+    };
+    const baseUrl = await startUiServer({
+      listCaseTraces: () => [caseRecord],
+      getCaseTrace: (caseId: string) => (caseId === "case-1" ? caseRecord : undefined),
+    });
+
+    const listResponse = await fetch(`${baseUrl}/api/cases`);
+    expect(listResponse.status).toBe(200);
+    await expect(listResponse.json()).resolves.toEqual([caseRecord]);
+
+    const detailResponse = await fetch(`${baseUrl}/api/cases/case-1`);
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toEqual(caseRecord);
+
+    const removedResponse = await fetch(`${baseUrl}/api/retrieve?q=test`);
+    expect(removedResponse.status).toBe(404);
   });
 });

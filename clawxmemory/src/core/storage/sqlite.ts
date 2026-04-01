@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
   ActiveTopicBufferRecord,
+  CaseTraceRecord,
   DashboardOverview,
   FactCandidate,
   GlobalProfileRecord,
@@ -31,6 +32,7 @@ type SearchIdHit = { id: string; score: number };
 const GLOBAL_PROFILE_RECORD_ID = "global_profile_record" as const;
 const INDEXING_SETTINGS_STATE_KEY = "indexingSettings" as const;
 const LAST_INDEXED_AT_STATE_KEY = "lastIndexedAt" as const;
+const RECENT_CASE_TRACES_STATE_KEY = "recentCaseTraces" as const;
 
 export class MemoryBundleValidationError extends Error {
   constructor(message: string) {
@@ -62,6 +64,46 @@ export interface RepairMemoryResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function parseCaseTraceRecord(value: unknown): CaseTraceRecord | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.caseId !== "string" || !value.caseId.trim()) return null;
+  if (typeof value.sessionKey !== "string") return null;
+  if (typeof value.query !== "string") return null;
+  if (typeof value.startedAt !== "string" || !value.startedAt.trim()) return null;
+  const status = (typeof value.status === "string" ? value.status : "running") as CaseTraceRecord["status"];
+  if (!["running", "completed", "interrupted", "error"].includes(status)) return null;
+  let retrieval: CaseTraceRecord["retrieval"];
+  if (isRecord(value.retrieval)) {
+    const next: NonNullable<CaseTraceRecord["retrieval"]> = {
+      injected: Boolean(value.retrieval.injected),
+      contextPreview: typeof value.retrieval.contextPreview === "string" ? value.retrieval.contextPreview : "",
+      evidenceNotePreview: typeof value.retrieval.evidenceNotePreview === "string" ? value.retrieval.evidenceNotePreview : "",
+      pathSummary: typeof value.retrieval.pathSummary === "string" ? value.retrieval.pathSummary : "",
+      trace: value.retrieval.trace && typeof value.retrieval.trace === "object"
+        ? value.retrieval.trace as NonNullable<CaseTraceRecord["retrieval"]>["trace"]
+        : null,
+    };
+    if (typeof value.retrieval.intent === "string") {
+      next.intent = value.retrieval.intent as "time" | "project" | "fact" | "general";
+    }
+    if (typeof value.retrieval.enoughAt === "string") {
+      next.enoughAt = value.retrieval.enoughAt as "profile" | "l2" | "l1" | "l0" | "none";
+    }
+    retrieval = next;
+  }
+  return {
+    caseId: value.caseId,
+    sessionKey: value.sessionKey,
+    query: value.query,
+    startedAt: value.startedAt,
+    ...(typeof value.finishedAt === "string" && value.finishedAt.trim() ? { finishedAt: value.finishedAt } : {}),
+    status,
+    ...(retrieval ? { retrieval } : {}),
+    toolEvents: Array.isArray(value.toolEvents) ? value.toolEvents as CaseTraceRecord["toolEvents"] : [],
+    assistantReply: typeof value.assistantReply === "string" ? value.assistantReply : "",
+  };
 }
 
 function requireString(value: unknown, field: string): string {
@@ -1311,6 +1353,34 @@ export class MemoryRepository {
   deletePipelineState(key: string): void {
     const stmt = this.db.prepare("DELETE FROM pipeline_state WHERE state_key = ?");
     stmt.run(key);
+  }
+
+  listRecentCaseTraces(limit: number): CaseTraceRecord[] {
+    const raw = this.getPipelineState(RECENT_CASE_TRACES_STATE_KEY);
+    if (!raw) return [];
+    const parsed = safeJsonParse<unknown[]>(raw, []);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map(parseCaseTraceRecord)
+      .filter((record): record is CaseTraceRecord => Boolean(record))
+      .slice(0, Math.max(1, Math.min(200, limit)));
+  }
+
+  getCaseTrace(caseId: string): CaseTraceRecord | undefined {
+    if (!caseId.trim()) return undefined;
+    return this.listRecentCaseTraces(200).find((record) => record.caseId === caseId.trim());
+  }
+
+  saveCaseTrace(record: CaseTraceRecord, maxRecords = 30): void {
+    const normalized = parseCaseTraceRecord(record);
+    if (!normalized) return;
+    const next = this.listRecentCaseTraces(Math.max(1, Math.min(200, maxRecords + 20)))
+      .filter((item) => item.caseId !== normalized.caseId);
+    next.unshift(normalized);
+    this.setPipelineState(
+      RECENT_CASE_TRACES_STATE_KEY,
+      JSON.stringify(next.slice(0, Math.max(1, Math.min(200, maxRecords)))),
+    );
   }
 
   getIndexingSettings(defaults: IndexingSettings): IndexingSettings {

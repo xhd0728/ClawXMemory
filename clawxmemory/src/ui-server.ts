@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type CaseTraceRecord,
   type DashboardOverview,
   type HeartbeatStats,
   type IndexingSettings,
@@ -54,6 +55,8 @@ export interface UiServerControls {
     | "startupRepairMessage"
   >;
   getStartupRepairSnapshot: (limit: number) => MemoryUiSnapshot | undefined;
+  listCaseTraces: (limit: number) => CaseTraceRecord[];
+  getCaseTrace: (caseId: string) => CaseTraceRecord | undefined;
 }
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -353,16 +356,17 @@ export class LocalUiServer {
     if (relativePath === "/api/profile" || relativePath === "/api/facts") {
       return sendJson(res, this.repository.searchGlobalProfile(query, limit));
     }
-    if (relativePath === "/api/retrieve") {
-      return sendJson(
-        res,
-        await this.retriever.retrieve(query, {
-          retrievalMode: "explicit",
-          l2Limit: limit,
-          l1Limit: limit,
-          l0Limit: limit,
-        }),
-      );
+    if (relativePath === "/api/cases") {
+      if (upperMethod !== "GET") return sendMethodNotAllowed(res, "GET");
+      return sendJson(res, this.controls.listCaseTraces(parseLimit(url.searchParams.get("limit"), 5)));
+    }
+    if (relativePath.startsWith("/api/cases/")) {
+      if (upperMethod !== "GET") return sendMethodNotAllowed(res, "GET");
+      const caseId = decodeURIComponent(relativePath.slice("/api/cases/".length));
+      if (!caseId.trim()) return sendNotFound(res);
+      const record = this.controls.getCaseTrace(caseId);
+      if (!record) return sendNotFound(res);
+      return sendJson(res, record);
     }
     return sendNotFound(res);
   }

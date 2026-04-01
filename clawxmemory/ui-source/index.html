@@ -44,6 +44,9 @@
           <button class="nav-item" data-board="profile" type="button">
             <span class="nav-label" data-i18n="board.profile">个人画像</span>
           </button>
+          <button class="nav-item" data-board="memory_trace" type="button">
+            <span class="nav-label" data-i18n="board.memoryTrace">记忆追踪</span>
+          </button>
         </nav>
 
         <nav id="levelTabs" class="nav-list" style="display:none">
@@ -66,6 +69,10 @@
           <button class="nav-item" data-level="l0" type="button">
             <span class="nav-label" data-i18n="nav.l0">原始对话（L0）</span>
             <span class="nav-count" data-count-for="l0">0</span>
+          </button>
+          <button class="nav-item" data-level="memory_trace" type="button">
+            <span class="nav-label" data-i18n="nav.memory_trace">记忆追踪</span>
+            <span class="nav-count" data-count-for="memory_trace">0</span>
           </button>
         </nav>
 
@@ -192,6 +199,7 @@
             <div class="board-content board-active" id="projectBoard"></div>
             <div class="board-content" id="timelineBoard"></div>
             <div class="board-content" id="profileBoard"></div>
+            <div class="board-content" id="memoryTraceBoard"></div>
           </div>
           <div class="connection-panel" id="connectionPanel">
             <div class="connection-header">
@@ -212,7 +220,7 @@
               <span id="browserMeta" class="panel-meta">0</span>
             </div>
 
-            <div class="search-row">
+            <div class="search-row" id="listSearchRow">
               <input
                 id="listQueryInput"
                 type="text"
@@ -253,35 +261,6 @@
     </aside>
 
     <!-- settings drawer removed — all settings now in popover menu -->
-
-    <aside class="side-drawer retrieve-drawer" id="retrievePanel">
-      <div class="drawer-header">
-        <h3 data-i18n="retrieve.title">检索调试</h3>
-        <button id="retrieveCloseBtn" class="drawer-close" type="button" aria-label="Close">&#x2715;</button>
-      </div>
-
-      <div class="drawer-section">
-        <div class="retrieve-input">
-          <textarea
-            id="queryInput"
-            rows="4"
-            data-i18n="retrieve.placeholder"
-            data-i18n-attr="placeholder"
-            placeholder="输入问题，例如：这个项目最近进展到哪一步了？"
-          ></textarea>
-          <button id="retrieveBtn" class="tool-btn primary wide" type="button" data-i18n="retrieve.run">开始检索</button>
-        </div>
-      </div>
-
-      <div class="drawer-section">
-        <div id="retrieveSummary" class="summary-chip" data-i18n="retrieve.notYet">尚未检索</div>
-        <div id="retrieveTimeline" class="retrieval-timeline"></div>
-        <details class="context-block">
-          <summary data-i18n="retrieve.context">上下文</summary>
-          <pre id="retrieveResult"></pre>
-        </details>
-      </div>
-    </aside>
 
     <!-- Modal dialog -->
     <div class="modal-overlay" id="modalOverlay">

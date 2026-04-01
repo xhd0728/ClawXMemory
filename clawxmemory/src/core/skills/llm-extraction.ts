@@ -10,6 +10,7 @@ import type {
   ProjectDetail,
   ProjectStatus,
   RetrievalResult,
+  RetrievalPromptDebug,
 } from "../types.js";
 
 type LoggerLike = {
@@ -19,6 +20,7 @@ type LoggerLike = {
 };
 
 type ProviderHeaders = Record<string, string> | undefined;
+type PromptDebugSink = (debug: RetrievalPromptDebug) => void;
 
 function isTimeoutError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || /timeout/i.test(error.message));
@@ -214,6 +216,7 @@ export interface LlmMemoryRouteInput {
   profile: GlobalProfileRecord | null;
   timeoutMs?: number;
   agentId?: string;
+  debugTrace?: PromptDebugSink;
 }
 
 export interface LookupQuerySpec {
@@ -247,6 +250,7 @@ export interface LlmHop2L2Input {
   catalogTruncated?: boolean;
   timeoutMs?: number;
   agentId?: string;
+  debugTrace?: PromptDebugSink;
 }
 
 export interface Hop2L2Decision {
@@ -270,6 +274,7 @@ export interface LlmHop3L1Input {
   l1Windows: L1WindowRecord[];
   timeoutMs?: number;
   agentId?: string;
+  debugTrace?: PromptDebugSink;
 }
 
 export interface Hop3L1Decision {
@@ -285,6 +290,7 @@ export interface LlmHop4L0Input {
   l0Sessions: L0SessionRecord[];
   timeoutMs?: number;
   agentId?: string;
+  debugTrace?: PromptDebugSink;
 }
 
 export interface Hop4L0Decision {
@@ -1442,6 +1448,41 @@ export class LlmMemoryExtractor {
       : extractChatCompletionsText(payload);
   }
 
+  private async callStructuredJsonWithDebug<T>(input: {
+    systemPrompt: string;
+    userPrompt: string;
+    agentId?: string;
+    requestLabel: string;
+    timeoutMs?: number;
+    debugTrace?: PromptDebugSink;
+    parse: (raw: string) => T;
+  }): Promise<T> {
+    let rawResponse = "";
+    try {
+      rawResponse = await this.callStructuredJson(input);
+      const parsedResult = input.parse(rawResponse);
+      input.debugTrace?.({
+        requestLabel: input.requestLabel,
+        systemPrompt: input.systemPrompt,
+        userPrompt: input.userPrompt,
+        rawResponse,
+        parsedResult,
+      });
+      return parsedResult;
+    } catch (error) {
+      input.debugTrace?.({
+        requestLabel: input.requestLabel,
+        systemPrompt: input.systemPrompt,
+        userPrompt: input.userPrompt,
+        rawResponse,
+        errored: true,
+        timedOut: isTimeoutError(error) || (error instanceof Error && /timed out/i.test(error.message)),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
   async extract(input: { timestamp: string; messages: MemoryMessage[]; agentId?: string }): Promise<SessionExtractionResult> {
     let parsed: RawExtractionPayload | undefined;
     let lastError: unknown;
@@ -1760,15 +1801,18 @@ export class LlmMemoryExtractor {
 
   async decideMemoryLookup(input: LlmMemoryRouteInput): Promise<Hop1LookupDecision> {
     const defaultQuery = truncateForPrompt(input.query, 120);
+    const systemPrompt = HOP1_LOOKUP_SYSTEM_PROMPT;
+    const userPrompt = buildHop1RoutePrompt(input);
     try {
-      const raw = await this.callStructuredJson({
-        systemPrompt: HOP1_LOOKUP_SYSTEM_PROMPT,
-        userPrompt: buildHop1RoutePrompt(input),
+      const parsed = await this.callStructuredJsonWithDebug<RawHop1RoutePayload>({
+        systemPrompt,
+        userPrompt,
         requestLabel: "Hop1 lookup",
         timeoutMs: input.timeoutMs ?? 4_000,
         ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.debugTrace ? { debugTrace: input.debugTrace } : {}),
+        parse: (raw) => JSON.parse(extractFirstJsonObject(raw)) as RawHop1RoutePayload,
       });
-      const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawHop1RoutePayload;
       const baseOnly = normalizeBoolean(parsed.base_only, false);
       return {
         memoryRelevant: normalizeBoolean(parsed.memory_relevant, true),
@@ -1791,14 +1835,15 @@ export class LlmMemoryExtractor {
 
   private async runL2SelectionOnce(input: LlmHop2L2Input): Promise<Hop2L2Decision> {
     try {
-      const raw = await this.callStructuredJson({
+      const parsed = await this.callStructuredJsonWithDebug<RawHop2L2Payload>({
         systemPrompt: HOP2_L2_SYSTEM_PROMPT,
         userPrompt: buildHop2L2Prompt(input),
         requestLabel: "Hop2 L2 selection",
         timeoutMs: input.timeoutMs ?? 5_000,
         ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.debugTrace ? { debugTrace: input.debugTrace } : {}),
+        parse: (raw) => JSON.parse(extractFirstJsonObject(raw)) as RawHop2L2Payload,
       });
-      const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawHop2L2Payload;
       const enoughAt = parsed.enough_at === "l2" || parsed.enough_at === "descend_l1" || parsed.enough_at === "none"
         ? parsed.enough_at
         : "none";
@@ -1852,14 +1897,15 @@ export class LlmMemoryExtractor {
       };
     }
     try {
-      const raw = await this.callStructuredJson({
+      const parsed = await this.callStructuredJsonWithDebug<RawHop3L1Payload>({
         systemPrompt: HOP3_L1_SYSTEM_PROMPT,
         userPrompt: buildHop3L1Prompt(input),
         requestLabel: "Hop3 L1 selection",
         timeoutMs: input.timeoutMs ?? 5_000,
         ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.debugTrace ? { debugTrace: input.debugTrace } : {}),
+        parse: (raw) => JSON.parse(extractFirstJsonObject(raw)) as RawHop3L1Payload,
       });
-      const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawHop3L1Payload;
       const enoughAt = parsed.enough_at === "l1" || parsed.enough_at === "descend_l0" || parsed.enough_at === "none"
         ? parsed.enough_at
         : "none";
@@ -1892,14 +1938,15 @@ export class LlmMemoryExtractor {
       };
     }
     try {
-      const raw = await this.callStructuredJson({
+      const parsed = await this.callStructuredJsonWithDebug<RawHop4L0Payload>({
         systemPrompt: HOP4_L0_SYSTEM_PROMPT,
         userPrompt: buildHop4L0Prompt(input),
         requestLabel: "Hop4 L0 selection",
         timeoutMs: input.timeoutMs ?? 5_000,
         ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.debugTrace ? { debugTrace: input.debugTrace } : {}),
+        parse: (raw) => JSON.parse(extractFirstJsonObject(raw)) as RawHop4L0Payload,
       });
-      const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawHop4L0Payload;
       const enoughAt = parsed.enough_at === "l0" || parsed.enough_at === "none"
         ? parsed.enough_at
         : "none";

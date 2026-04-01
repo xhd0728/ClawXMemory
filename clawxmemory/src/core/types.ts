@@ -157,6 +157,117 @@ export interface L0SearchResult {
   item: L0SessionRecord;
 }
 
+export interface RetrievalTraceKvEntry {
+  label: string;
+  value: string;
+}
+
+export type RetrievalTraceDetail =
+  | {
+      key: string;
+      label: string;
+      kind: "text" | "note";
+      text: string;
+    }
+  | {
+      key: string;
+      label: string;
+      kind: "list";
+      items: string[];
+    }
+  | {
+      key: string;
+      label: string;
+      kind: "kv";
+      entries: RetrievalTraceKvEntry[];
+    }
+  | {
+      key: string;
+      label: string;
+      kind: "json";
+      json: unknown;
+    };
+
+export interface RetrievalPromptDebug {
+  requestLabel: string;
+  systemPrompt: string;
+  userPrompt: string;
+  rawResponse: string;
+  parsedResult?: unknown;
+  timedOut?: boolean;
+  errored?: boolean;
+  errorMessage?: string;
+}
+
+export type RetrievalTraceStepKind =
+  | "recall_start"
+  | "cache_hit"
+  | "hop1_decision"
+  | "l2_candidates"
+  | "hop2_decision"
+  | "l1_candidates"
+  | "hop3_decision"
+  | "l0_candidates"
+  | "hop4_decision"
+  | "context_rendered"
+  | "fallback_applied"
+  | "recall_skipped";
+
+export interface RetrievalTraceStep {
+  stepId: string;
+  kind: RetrievalTraceStepKind;
+  title: string;
+  status: "info" | "success" | "warning" | "error" | "skipped";
+  inputSummary: string;
+  outputSummary: string;
+  refs?: Record<string, unknown>;
+  metrics?: Record<string, unknown>;
+  details?: RetrievalTraceDetail[];
+  promptDebug?: RetrievalPromptDebug;
+}
+
+export interface RetrievalTrace {
+  traceId: string;
+  query: string;
+  mode: "auto" | "explicit";
+  startedAt: string;
+  finishedAt: string;
+  steps: RetrievalTraceStep[];
+}
+
+export interface CaseToolEvent {
+  eventId: string;
+  phase: "start" | "result";
+  toolName: string;
+  toolCallId?: string;
+  occurredAt: string;
+  status: "running" | "success" | "error";
+  summary: string;
+  paramsPreview?: string;
+  resultPreview?: string;
+  durationMs?: number;
+}
+
+export interface CaseTraceRecord {
+  caseId: string;
+  sessionKey: string;
+  query: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: "running" | "completed" | "interrupted" | "error";
+  retrieval?: {
+    intent?: IntentType;
+    enoughAt?: RetrievalResult["enoughAt"];
+    injected: boolean;
+    contextPreview: string;
+    evidenceNotePreview: string;
+    pathSummary: string;
+    trace: RetrievalTrace | null;
+  };
+  toolEvents: CaseToolEvent[];
+  assistantReply: string;
+}
+
 export interface RetrievalResult {
   query: string;
   intent: IntentType;
@@ -167,6 +278,7 @@ export interface RetrievalResult {
   l1Results: L1SearchResult[];
   l0Results: L0SearchResult[];
   context: string;
+  trace?: RetrievalTrace;
   debug?: {
     mode: "llm" | "local_fallback" | "none";
     elapsedMs: number;
