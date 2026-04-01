@@ -13,6 +13,7 @@ const retrievalResult: RetrievalResult = {
   intent: "project",
   enoughAt: "l2",
   profile: null,
+  evidenceNote: "ClawXMemory is in SDK migration and the latest progress is plugin-sdk migration.",
   l2Results: [
     {
       level: "l2_project",
@@ -212,6 +213,7 @@ describe("buildPluginTools", () => {
       ok: true,
       intent: "project",
       enoughAt: "l2",
+      evidenceNote: retrievalResult.evidenceNote,
       refs: {
         l2: [{ id: "l2-project-1", level: "l2_project" }],
       },

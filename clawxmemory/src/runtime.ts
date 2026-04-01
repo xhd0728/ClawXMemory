@@ -35,7 +35,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 const MEMORY_REPAIR_VERSION = "2026-03-24-recall-injection-cleanup-v15";
-const INDEXING_SETTINGS_MIGRATION_VERSION = "2026-03-16-reasoning-mode-settings-v1";
+const INDEXING_SETTINGS_MIGRATION_VERSION = "2026-04-01-recall-topk-settings-v2";
 const PLUGIN_ID = "openbmb-clawxmemory";
 const NATIVE_MEMORY_PLUGIN_ID = "memory-core";
 const CHAT_FACING_MEMORY_TOOLS = ["memory_overview", "memory_list", "memory_flush"] as const;
@@ -766,23 +766,18 @@ export class MemoryPluginRuntime {
     try {
       const startedAt = Date.now();
       const settings = this.indexer.getSettings();
+      const recallTopK = Math.max(1, Math.min(50, settings.recallTopK || 10));
       const retrieved = await this.retriever.retrieve(prompt, {
         retrievalMode: "auto",
-        l2Limit: 4,
-        l1Limit: 2,
-        l0Limit: 1,
+        l2Limit: recallTopK,
+        l1Limit: recallTopK,
+        l0Limit: recallTopK,
         includeFacts: true,
       });
       const elapsedMs = Date.now() - startedAt;
-      if (
-        settings.reasoningMode === "answer_first"
-        && elapsedMs > settings.maxAutoReplyLatencyMs + 300
-      ) {
-        this.logger.warn?.(`[clawxmemory] recall slow query_ms=${elapsedMs} prompt_chars=${prompt.length}`);
-      }
       const injected = Boolean(retrieved.context?.trim());
       this.logger.info?.(
-        `[clawxmemory] recall mode=${retrieved.debug?.mode ?? "none"} reasoning_mode=${settings.reasoningMode} latency_cap_ms=${settings.reasoningMode === "answer_first" ? settings.maxAutoReplyLatencyMs : "none"} enough_at=${retrieved.enoughAt} injected=${injected} elapsed_ms=${retrieved.debug?.elapsedMs ?? elapsedMs} cache_hit=${retrieved.debug?.cacheHit ? "1" : "0"}`,
+        `[clawxmemory] recall mode=${retrieved.debug?.mode ?? "none"} reasoning_mode=${settings.reasoningMode} recall_top_k=${recallTopK} enough_at=${retrieved.enoughAt} injected=${injected} elapsed_ms=${retrieved.debug?.elapsedMs ?? elapsedMs} cache_hit=${retrieved.debug?.cacheHit ? "1" : "0"}`,
       );
       if (!retrieved.context.trim()) return;
       // Dynamic recall must stay in system prompt space; prependContext leaks into user-visible prompt displays.

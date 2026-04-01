@@ -377,14 +377,20 @@ function normalizeIndexingSettings(
 ): IndexingSettings {
   const legacy = input as Record<string, unknown> | undefined;
   const reasoningMode = input?.reasoningMode === "accuracy_first" ? "accuracy_first" : "answer_first";
-  const rawLatency = typeof input?.maxAutoReplyLatencyMs === "number" && Number.isFinite(input.maxAutoReplyLatencyMs)
-    ? input.maxAutoReplyLatencyMs
-    : typeof legacy?.recallBudgetMs === "number" && Number.isFinite(legacy.recallBudgetMs)
-      ? legacy.recallBudgetMs
-      : defaults.maxAutoReplyLatencyMs;
+  const rawTopK = typeof input?.recallTopK === "number" && Number.isFinite(input.recallTopK)
+    ? input.recallTopK
+    : typeof legacy?.recallTopK === "number" && Number.isFinite(legacy.recallTopK)
+      ? legacy.recallTopK
+      : typeof legacy?.recallTopK === "string" && legacy.recallTopK.trim()
+        ? Number.parseInt(legacy.recallTopK, 10)
+        : typeof legacy?.maxAutoReplyLatencyMs === "number" && Number.isFinite(legacy.maxAutoReplyLatencyMs)
+          ? Math.max(1, Math.min(50, Math.round(legacy.maxAutoReplyLatencyMs / 180)))
+          : typeof legacy?.recallBudgetMs === "number" && Number.isFinite(legacy.recallBudgetMs)
+            ? Math.max(1, Math.min(50, Math.round(legacy.recallBudgetMs / 180)))
+            : defaults.recallTopK;
   return {
     reasoningMode,
-    maxAutoReplyLatencyMs: Math.max(300, Math.floor(rawLatency)),
+    recallTopK: Math.max(1, Math.min(50, Math.floor(rawTopK))),
   };
 }
 
@@ -506,6 +512,107 @@ export class MemoryRepository {
     } catch {
       return [];
     }
+  }
+
+  private compareL2SearchHits(left: L2SearchResult, right: L2SearchResult): number {
+    if (right.score !== left.score) return right.score - left.score;
+    if (left.level === right.level) {
+      if (left.level === "l2_time" && right.level === "l2_time") {
+        return right.item.dateKey.localeCompare(left.item.dateKey);
+      }
+      if (left.level === "l2_project" && right.level === "l2_project") {
+        return right.item.updatedAt.localeCompare(left.item.updatedAt);
+      }
+    }
+    const leftRecency = left.level === "l2_time" ? left.item.dateKey : left.item.updatedAt;
+    const rightRecency = right.level === "l2_time" ? right.item.dateKey : right.item.updatedAt;
+    return rightRecency.localeCompare(leftRecency);
+  }
+
+  private searchRankedL2TimeIndexes(query: string, limit: number): Array<Extract<L2SearchResult, { level: "l2_time" }>> {
+    if (limit <= 0) return [];
+    const recent = this.listRecentL2Time(Math.max(50, limit * 8));
+    const recentById = new Map(recent.map((item) => [item.l2IndexId, item]));
+    const ftsHits = this.searchFts("l2_time_fts", "l2_index_id", query, Math.max(limit * 2, 8));
+    const missingFtsIds = ftsHits
+      .map((hit) => hit.id)
+      .filter((id) => !recentById.has(id));
+    for (const item of this.getL2TimeByIds(missingFtsIds)) {
+      recentById.set(item.l2IndexId, item);
+    }
+
+    const ordered: Array<Extract<L2SearchResult, { level: "l2_time" }>> = [];
+    const seen = new Set<string>();
+    for (const hit of ftsHits) {
+      const item = recentById.get(hit.id);
+      if (!item || seen.has(item.l2IndexId)) continue;
+      seen.add(item.l2IndexId);
+      ordered.push({ level: "l2_time", score: hit.score, item });
+      if (ordered.length >= limit) return ordered;
+    }
+
+    const fallback = recent
+      .filter((item) => !seen.has(item.l2IndexId))
+      .map((item) => ({
+        item,
+        score: computeTokenScore(query, [item.dateKey, item.summary]),
+      }))
+      .filter((hit) => hit.score > 0.12)
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        return right.item.dateKey.localeCompare(left.item.dateKey);
+      })
+      .slice(0, Math.max(0, limit - ordered.length))
+      .map((hit) => ({
+        level: "l2_time" as const,
+        score: ordered.length > 0 ? Math.min(0.19, hit.score) : hit.score,
+        item: hit.item,
+      }));
+
+    return [...ordered, ...fallback];
+  }
+
+  private searchRankedL2ProjectIndexes(query: string, limit: number): Array<Extract<L2SearchResult, { level: "l2_project" }>> {
+    if (limit <= 0) return [];
+    const recent = this.listRecentL2Projects(Math.max(50, limit * 8));
+    const recentById = new Map(recent.map((item) => [item.l2IndexId, item]));
+    const ftsHits = this.searchFts("l2_project_fts", "l2_index_id", query, Math.max(limit * 2, 8));
+    const missingFtsIds = ftsHits
+      .map((hit) => hit.id)
+      .filter((id) => !recentById.has(id));
+    for (const item of this.getL2ProjectByIds(missingFtsIds)) {
+      recentById.set(item.l2IndexId, item);
+    }
+
+    const ordered: Array<Extract<L2SearchResult, { level: "l2_project" }>> = [];
+    const seen = new Set<string>();
+    for (const hit of ftsHits) {
+      const item = recentById.get(hit.id);
+      if (!item || seen.has(item.l2IndexId)) continue;
+      seen.add(item.l2IndexId);
+      ordered.push({ level: "l2_project", score: hit.score, item });
+      if (ordered.length >= limit) return ordered;
+    }
+
+    const fallback = recent
+      .filter((item) => !seen.has(item.l2IndexId))
+      .map((item) => ({
+        item,
+        score: computeTokenScore(query, [item.projectKey, item.projectName, item.summary, item.currentStatus, item.latestProgress]),
+      }))
+      .filter((hit) => hit.score > 0.12)
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        return right.item.updatedAt.localeCompare(left.item.updatedAt);
+      })
+      .slice(0, Math.max(0, limit - ordered.length))
+      .map((hit) => ({
+        level: "l2_project" as const,
+        score: ordered.length > 0 ? Math.min(0.19, hit.score) : hit.score,
+        item: hit.item,
+      }));
+
+    return [...ordered, ...fallback];
   }
 
   private syncProfileFts(profile: GlobalProfileRecord): void {
@@ -861,13 +968,30 @@ export class MemoryRepository {
 
   searchL1Hits(query: string, limit = 10): L1SearchResult[] {
     const recent = this.listRecentL1(Math.max(60, limit * 10));
-    const ftsHits = this.searchFts("l1_window_fts", "l1_index_id", query, limit * 2);
-    const ftsById = new Map(ftsHits.map((hit) => [hit.id, hit.score]));
-    const scored = recent.map((item) => ({
-      item,
-      score: Math.max(
-        ftsById.get(item.l1IndexId) ?? 0,
-        computeTokenScore(query, [
+    const recentById = new Map(recent.map((item) => [item.l1IndexId, item]));
+    const ftsHits = this.searchFts("l1_window_fts", "l1_index_id", query, Math.max(limit * 2, 8));
+    const missingFtsIds = ftsHits
+      .map((hit) => hit.id)
+      .filter((id) => !recentById.has(id));
+    for (const item of this.getL1ByIds(missingFtsIds)) {
+      recentById.set(item.l1IndexId, item);
+    }
+
+    const ordered: L1SearchResult[] = [];
+    const seen = new Set<string>();
+    for (const hit of ftsHits) {
+      const item = recentById.get(hit.id);
+      if (!item || seen.has(item.l1IndexId)) continue;
+      seen.add(item.l1IndexId);
+      ordered.push({ item, score: hit.score });
+      if (ordered.length >= limit) return ordered;
+    }
+
+    const fallback = recent
+      .filter((item) => !seen.has(item.l1IndexId))
+      .map((item) => ({
+        item,
+        score: computeTokenScore(query, [
           item.sessionKey,
           item.timePeriod,
           item.summary,
@@ -876,12 +1000,20 @@ export class MemoryRepository {
           item.projectDetails.map((project) => `${project.name} ${project.summary} ${project.latestProgress}`).join(" "),
           JSON.stringify(item.facts),
         ]),
-      ),
-    }));
-    return scored
+      }))
       .filter((hit) => hit.score > 0.15)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+      .sort((left, right) => {
+        if (right.score !== left.score) return right.score - left.score;
+        const endedCompare = right.item.endedAt.localeCompare(left.item.endedAt);
+        return endedCompare !== 0 ? endedCompare : right.item.createdAt.localeCompare(left.item.createdAt);
+      })
+      .slice(0, Math.max(0, limit - ordered.length))
+      .map((hit) => ({
+        item: hit.item,
+        score: ordered.length > 0 ? Math.min(0.19, hit.score) : hit.score,
+      }));
+
+    return [...ordered, ...fallback];
   }
 
   getL2TimeByDate(dateKey: string): L2TimeIndexRecord | undefined {
@@ -939,7 +1071,7 @@ export class MemoryRepository {
   }
 
   searchL2TimeIndexes(query: string, limit = 10): L2SearchResult[] {
-    return this.searchL2Hits(query, limit).filter((hit) => hit.level === "l2_time");
+    return this.searchRankedL2TimeIndexes(query, limit);
   }
 
   listRecentL2Time(limit = 20, offset = 0): L2TimeIndexRecord[] {
@@ -1023,7 +1155,7 @@ export class MemoryRepository {
   }
 
   searchL2ProjectIndexes(query: string, limit = 10): L2SearchResult[] {
-    return this.searchL2Hits(query, limit).filter((hit) => hit.level === "l2_project");
+    return this.searchRankedL2ProjectIndexes(query, limit);
   }
 
   listRecentL2Projects(limit = 20, offset = 0): L2ProjectIndexRecord[] {
@@ -1039,27 +1171,11 @@ export class MemoryRepository {
   }
 
   searchL2Hits(query: string, limit = 10): L2SearchResult[] {
-    const recentTime = this.listRecentL2Time(Math.max(50, limit * 8));
-    const recentProject = this.listRecentL2Projects(Math.max(50, limit * 8));
-    const timeFts = new Map(this.searchFts("l2_time_fts", "l2_index_id", query, limit * 2).map((hit) => [hit.id, hit.score]));
-    const projectFts = new Map(this.searchFts("l2_project_fts", "l2_index_id", query, limit * 2).map((hit) => [hit.id, hit.score]));
-    const timeHits = recentTime.map((item) => ({
-      level: "l2_time" as const,
-      score: Math.max(timeFts.get(item.l2IndexId) ?? 0, computeTokenScore(query, [item.dateKey, item.summary])),
-      item,
-    }));
-    const projectHits = recentProject.map((item) => ({
-      level: "l2_project" as const,
-      score: Math.max(
-        projectFts.get(item.l2IndexId) ?? 0,
-        computeTokenScore(query, [item.projectKey, item.projectName, item.summary, item.latestProgress]),
-      ),
-      item,
-    }));
-    const combined = [...timeHits, ...projectHits]
-      .filter((hit) => hit.score > 0.12)
-      .sort((a, b) => b.score - a.score);
-    return combined.slice(0, limit);
+    const timeHits = this.searchRankedL2TimeIndexes(query, limit);
+    const projectHits = this.searchRankedL2ProjectIndexes(query, limit);
+    return [...timeHits, ...projectHits]
+      .sort((left, right) => this.compareL2SearchHits(left, right))
+      .slice(0, limit);
   }
 
   getGlobalProfileRecord(): GlobalProfileRecord {
@@ -1110,7 +1226,8 @@ export class MemoryRepository {
     const profile = this.getGlobalProfileRecord();
     if (!profile.profileText.trim()) return null;
     const ftsScore = this.searchFts("global_profile_fts", "record_id", query, 1)[0]?.score ?? 0;
-    const score = Math.max(ftsScore, computeTokenScore(query, [profile.profileText, profile.sourceL1Ids.join(" ")]));
+    const tokenScore = computeTokenScore(query, [profile.profileText, profile.sourceL1Ids.join(" ")]);
+    const score = ftsScore > 0 ? ftsScore : tokenScore;
     if (query.trim() && score <= 0.1) return null;
     return { item: profile, score: Math.max(score, query.trim() ? score : 0.2) };
   }
@@ -1500,7 +1617,7 @@ export class MemoryRepository {
       overview: this.getOverview(),
       settings: this.getIndexingSettings({
         reasoningMode: "answer_first",
-        maxAutoReplyLatencyMs: 1800,
+        recallTopK: 10,
       }),
       recentTimeIndexes: this.listRecentL2Time(limit),
       recentProjectIndexes: this.listRecentL2Projects(limit),

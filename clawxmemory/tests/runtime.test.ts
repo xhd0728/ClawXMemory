@@ -181,6 +181,7 @@ describe("MemoryPluginRuntime", () => {
         intent: "time",
         enoughAt: "l2",
         profile: null,
+        evidenceNote: "2026-03-23: OpenClaw plugin SDK migration started.",
         l2Results: [],
         l1Results: [],
         l0Results: [],

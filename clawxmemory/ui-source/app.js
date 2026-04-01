@@ -29,10 +29,10 @@ const LOCALES = {
     "detail.empty": "选择左侧记录查看详情",
     "settings.title": "设置",
     "settings.mode": "推理模式",
-    "settings.mode.help": "效率优先遵守最大可接受时延；准确优先不受时延限制。",
+    "settings.mode.help": "效率优先停在 L2 知识笔记；准确优先允许继续下钻到 L1/L0。",
     "settings.mode.answer_first": "效率优先",
     "settings.mode.accuracy_first": "准确优先",
-    "settings.maxLatency": "最大可接受时延（毫秒）",
+    "settings.maxLatency": "召回数量",
     "settings.save": "保存设置",
     "settings.theme": "主题",
     "settings.theme.light": "浅色",
@@ -244,10 +244,10 @@ const LOCALES = {
     "detail.empty": "Select a record to view details",
     "settings.title": "Settings",
     "settings.mode": "Reasoning mode",
-    "settings.mode.help": "Speed first obeys the max acceptable latency; accuracy first ignores that latency cap.",
+    "settings.mode.help": "Speed first stops at the L2 evidence note; accuracy first can continue into L1/L0.",
     "settings.mode.answer_first": "Speed first",
     "settings.mode.accuracy_first": "Accuracy first",
-    "settings.maxLatency": "Max acceptable latency (ms)",
+    "settings.maxLatency": "Recall Top K",
     "settings.save": "Save",
     "settings.theme": "Theme",
     "settings.theme.light": "Light",
@@ -632,7 +632,7 @@ const state = {
   overview: {},
   settings: {
     reasoningMode: "answer_first",
-    maxAutoReplyLatencyMs: 1800,
+    recallTopK: 10,
   },
   globalProfile: { recordId: "global_profile_record", profileText: "", sourceL1Ids: [], createdAt: "", updatedAt: "" },
   baseRaw: { l2_time: [], l2_project: [], l1: [], l0: [], profile: [] },
@@ -984,7 +984,7 @@ function renderOverview(overview = {}) {
 function applySettings(settings = {}) {
   state.settings = {
     reasoningMode: "answer_first",
-    maxAutoReplyLatencyMs: 1800,
+    recallTopK: 10,
     ...(settings || {}),
   };
   const activeMode = state.settings.reasoningMode || "answer_first";
@@ -993,33 +993,30 @@ function applySettings(settings = {}) {
       btn.classList.toggle("active", btn.dataset.mode === activeMode);
     });
   }
-  maxAutoReplyLatencyInput.value = String(state.settings.maxAutoReplyLatencyMs ?? 1800);
+  maxAutoReplyLatencyInput.value = String(state.settings.recallTopK ?? 10);
   updateSettingsVisibility();
 }
 
 function readSettingsForm() {
-  const parsedLatency = Number.parseInt(String(maxAutoReplyLatencyInput.value || "").trim(), 10);
+  const parsedRecallTopK = Number.parseInt(String(maxAutoReplyLatencyInput.value || "").trim(), 10);
   const activeBtn = reasoningModeToggle?.querySelector(".popover-seg-btn.active");
   const reasoningMode = activeBtn?.dataset.mode === "accuracy_first" ? "accuracy_first" : "answer_first";
-  const next = { reasoningMode };
-  if (reasoningMode === "answer_first") {
-    next.maxAutoReplyLatencyMs = Number.isFinite(parsedLatency)
-      ? Math.max(300, parsedLatency)
-      : state.settings.maxAutoReplyLatencyMs;
-  }
-  return next;
+  return {
+    reasoningMode,
+    recallTopK: Number.isFinite(parsedRecallTopK)
+      ? Math.max(1, Math.min(50, parsedRecallTopK))
+      : state.settings.recallTopK,
+  };
 }
 
 function updateSettingsVisibility() {
-  const activeBtn = reasoningModeToggle?.querySelector(".popover-seg-btn.active");
-  const answerFirst = (activeBtn?.dataset.mode || state.settings.reasoningMode) === "answer_first";
   if (latencyFieldWrap) {
-    latencyFieldWrap.hidden = !answerFirst;
-    latencyFieldWrap.style.display = answerFirst ? "" : "none";
-    latencyFieldWrap.setAttribute("aria-hidden", answerFirst ? "false" : "true");
+    latencyFieldWrap.hidden = false;
+    latencyFieldWrap.style.display = "";
+    latencyFieldWrap.setAttribute("aria-hidden", "false");
   }
   if (maxAutoReplyLatencyInput) {
-    maxAutoReplyLatencyInput.disabled = !answerFirst;
+    maxAutoReplyLatencyInput.disabled = false;
   }
 }
 
@@ -2242,7 +2239,7 @@ function renderRetrieveResult(data) {
     ? ` · mode=${data.debug.mode} · path=${data.debug.path || "explicit"} · ${data.debug.elapsedMs}ms${data.debug.cacheHit ? " · cache" : ""}${data.debug.budgetLimited ? " · budget" : ""}`
     : "";
   retrieveSummary.textContent = `intent=${data.intent || "general"} · enoughAt=${data.enoughAt || "none"}${debugBits}`;
-  retrieveResult.textContent = data.context || "";
+  retrieveResult.textContent = data.evidenceNote || data.context || "";
 
   if (data.profile?.profileText) {
     retrieveTimeline.append(
@@ -2285,9 +2282,7 @@ async function saveSettings() {
   const settings = await postJson("./api/settings", payload);
   applySettings(settings);
   const modeLabel = t(`reasoning.${settings.reasoningMode || "answer_first"}`);
-  const summary = settings.reasoningMode === "answer_first"
-    ? `${modeLabel} · ${settings.maxAutoReplyLatencyMs}ms`
-    : modeLabel;
+  const summary = `${modeLabel} · topK=${settings.recallTopK ?? 10}`;
   setActivity("status.settingsSaved", "success", summary);
 }
 

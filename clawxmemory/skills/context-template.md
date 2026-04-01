@@ -4,6 +4,8 @@ enoughAt={{enoughAt}}
 
 {{profileBlock}}
 
+{{evidenceNoteBlock}}
+
 {{l2Block}}
 
 {{l1Block}}

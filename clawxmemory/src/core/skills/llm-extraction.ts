@@ -101,24 +101,29 @@ interface RawHop1RoutePayload {
 
 interface RawHop2L2Payload {
   intent?: unknown;
-  selected_l2_ids?: unknown;
+  evidence_note?: unknown;
   enough_at?: unknown;
 }
 
 interface RawHop3L1Payload {
-  use_profile?: unknown;
-  selected_l1_ids?: unknown;
+  evidence_note?: unknown;
   enough_at?: unknown;
 }
 
 interface RawHop4L0Payload {
-  selected_l0_ids?: unknown;
+  evidence_note?: unknown;
   enough_at?: unknown;
 }
 
 interface RawLookupQueryPayload {
   target_types?: unknown;
   lookup_query?: unknown;
+  time_range?: unknown;
+}
+
+interface RawTimeRangePayload {
+  start_date?: unknown;
+  end_date?: unknown;
 }
 
 export interface SessionExtractionResult {
@@ -214,6 +219,10 @@ export interface LlmMemoryRouteInput {
 export interface LookupQuerySpec {
   targetTypes: LookupTargetType[];
   lookupQuery: string;
+  timeRange?: {
+    startDate: string;
+    endDate: string;
+  } | null;
 }
 
 export interface Hop1LookupDecision {
@@ -242,7 +251,7 @@ export interface LlmHop2L2Input {
 
 export interface Hop2L2Decision {
   intent: IntentType;
-  selectedL2Ids: string[];
+  evidenceNote: string;
   enoughAt: "l2" | "descend_l1" | "none";
 }
 
@@ -256,7 +265,7 @@ export interface L0HeaderCandidate {
 
 export interface LlmHop3L1Input {
   query: string;
-  profile: GlobalProfileRecord | null;
+  evidenceNote: string;
   selectedL2Entries: L2CatalogEntry[];
   l1Windows: L1WindowRecord[];
   timeoutMs?: number;
@@ -264,13 +273,13 @@ export interface LlmHop3L1Input {
 }
 
 export interface Hop3L1Decision {
-  useProfile: boolean;
-  selectedL1Ids: string[];
+  evidenceNote: string;
   enoughAt: "l1" | "descend_l0" | "none";
 }
 
 export interface LlmHop4L0Input {
   query: string;
+  evidenceNote: string;
   selectedL2Entries: L2CatalogEntry[];
   selectedL1Windows: L1WindowRecord[];
   l0Sessions: L0SessionRecord[];
@@ -279,7 +288,7 @@ export interface LlmHop4L0Input {
 }
 
 export interface Hop4L0Decision {
-  selectedL0Ids: string[];
+  evidenceNote: string;
   enoughAt: "l0" | "none";
 }
 
@@ -529,6 +538,7 @@ const HOP1_LOOKUP_SYSTEM_PROMPT = `
 
 规则：
 - 以语义为准，不要做表面关键词匹配。
+- 输入里的 current_local_date 是当前本地日期，格式为 YYYY-MM-DD。
 - 输入里的 global_profile 是顶层稳定画像。
 - 如果问题仅靠 global_profile 就能回答，必须设为 base_only=true。
 - 典型 base_only 问题：
@@ -543,7 +553,11 @@ const HOP1_LOOKUP_SYSTEM_PROMPT = `
 - 如果 base_only=true，lookup_queries 必须是空数组。
 - mixed question 可以同时涉及时间和项目，此时 target_types 可以是 ["time","project"]。
 - lookup_query 要写成后续检索可用的短查询词，而不是复述整段规则。
-- 时间相关问题尽量写出明确日期或带日期感的查询词；如果做不到，也要写出清晰的时间范围表达。
+- 只有当问题真的与时间范围相关时，才输出 time_range。
+- time_range 必须规范化为本地日期范围，格式:
+  { "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" }
+- "今天"、"昨天"、"最近一周"、"上个月"、"3月16日到3月18日" 这类问题都应尽量转成明确日期范围。
+- 如果是项目问题但同时限定了时间，也可以在同一条 lookup_query 里同时给 target_types=["time","project"] 并附带 time_range。
 - 不要在这一跳选择具体记录 id。
 - 只返回 JSON，不要返回解释。
 
@@ -555,9 +569,9 @@ const HOP1_LOOKUP_SYSTEM_PROMPT = `
 - Query: "良子是谁"
   -> memory_relevant=true, base_only=true, lookup_queries=[]
 - Query: "我今天都在忙什么"
-  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time"],"lookup_query":"今天 2026-03-16 做了什么"}]
+  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time"],"lookup_query":"今天做了什么","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
 - Query: "我今天论文进展怎么样"
-  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time","project"],"lookup_query":"今天 EMNLP 论文进展"}]
+  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time","project"],"lookup_query":"今天 EMNLP 论文进展","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
 - Query: "你之前推荐我的北京烧烤店是哪家"
   -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["project"],"lookup_query":"北京 烧烤店 推荐"}]
 
@@ -568,7 +582,11 @@ const HOP1_LOOKUP_SYSTEM_PROMPT = `
   "lookup_queries": [
     {
       "target_types": ["time", "project"],
-      "lookup_query": "short lookup query"
+      "lookup_query": "short lookup query",
+      "time_range": {
+        "start_date": "YYYY-MM-DD",
+        "end_date": "YYYY-MM-DD"
+      }
     }
   ]
 }
@@ -577,19 +595,19 @@ const HOP1_LOOKUP_SYSTEM_PROMPT = `
 const HOP2_L2_SYSTEM_PROMPT = `
 你是记忆检索系统的第二跳规划器。
 
-你现在已经看到了真实的 L2 索引内容。你的任务是：
-1. 选择真正相关的 L2 记录
-2. 判断停在 L2 是否已经足够
-3. 如果不够，再决定继续下钻到 L1
+你现在已经看到了代码侧确定选出的真实 L2 索引内容。你的任务是：
+1. 读取这些 L2 证据
+2. 生成一段与当前问题直接相关的 evidence_note
+3. 判断停在 L2 是否已经足够；如果不够，再决定继续下钻到 L1
 
 规则：
 - l2_entries 不是目录名，它们已经包含压缩后的真实 L2 内容。
 - 以语义为准，不要做表面关键词匹配。
-- selected_l2_ids 可以是 0 条、1 条或多条。
-- 如果某条或某几条 L2 已经足够回答，就设 enough_at="l2"。
+- evidence_note 必须是紧凑的知识笔记，只保留与回答问题有关的信息，不要复述所有条目。
+- 如果 L2 已经足够回答，就设 enough_at="l2"。
 - 如果 L2 相关但还不够，需要看它 link 到的 L1，就设 enough_at="descend_l1"。
 - 只有在 L2 真的帮不上忙时，才设 enough_at="none"。
-- 如果问题是稳定画像类问题，例如语言偏好、长期身份、交流风格，而 global_profile 已经足够，就不要选 L2。
+- 如果问题是稳定画像类问题，例如语言偏好、长期身份、交流风格，而 global_profile 已经足够，就让 evidence_note 为空并设 enough_at="none"。
 - mixed question 可以同时选中时间 L2 和项目 L2。
 - 如果 exact answer 已经直接出现在项目 L2 的 latest progress 或 summary 里，就可以停在 L2，不需要强行下钻。
 - catalog_truncated=true 只表示为了 prompt 预算省略了一些更旧条目，不表示当前条目不可靠。
@@ -597,60 +615,61 @@ const HOP2_L2_SYSTEM_PROMPT = `
 
 重点示例：
 - Query: "我喜欢用什么语言交流"
-  -> selected_l2_ids=[], enough_at="none"
+  -> evidence_note="", enough_at="none"
 - Query: "我今天都在忙什么"
-  -> 选中今天的 time L2，enough_at="l2"
+  -> 从今天的 time L2 提炼出今天在忙什么的 evidence_note，enough_at="l2"
 - Query: "我今天论文进展怎么样"
-  -> 可以同时选中今天的 time L2 和相关 project L2
+  -> 将今天的 time L2 和相关 project L2 融合成一段 evidence_note
 - Query: "你之前推荐我的北京烧烤店是哪家"
   -> 如果项目 L2 的 latest progress 已经列出店名，则 enough_at="l2"；如果没有 exact name，再设为 "descend_l1"
 
 严格使用这个 JSON 结构：
 {
   "intent": "time | project | fact | general",
-  "selected_l2_ids": ["l2 id"],
+  "evidence_note": "condensed note from L2 evidence",
   "enough_at": "l2 | descend_l1 | none"
 }
 `.trim();
 
 const HOP3_L1_SYSTEM_PROMPT = `
-You are the L1 planner for a memory retrieval system.
+You are the L1 evidence-note updater for a memory retrieval system.
 
-Your job is to read selected L2 evidence plus linked L1 windows and decide whether L1 is enough.
+Your job is to read the current evidence note, selected L2 evidence, plus linked L1 windows, then update the note and decide whether L1 is enough.
 
 Rules:
+- current_evidence_note is the knowledge note produced from previous hops. Refine it instead of discarding it.
 - Read the selected L2 entries as higher-level context.
 - Read the candidate L1 windows as the next level of evidence.
 - Do not choose L0 here.
+- evidence_note should preserve only information relevant to the user's query.
 - If selected L1 windows already answer the query, set enough_at="l1".
 - If lower raw conversation detail is still needed, set enough_at="descend_l0".
 - If neither L1 nor lower levels help, set enough_at="none".
-- use_profile should be true when the global profile still helps answer the question.
 - Return JSON only.
 
 Use this exact JSON shape:
 {
-  "use_profile": true,
-  "selected_l1_ids": ["l1 id"],
+  "evidence_note": "updated note from L1 evidence",
   "enough_at": "l1 | descend_l0 | none"
 }
 `.trim();
 
 const HOP4_L0_SYSTEM_PROMPT = `
-You are the raw-conversation planner for a memory retrieval system.
+You are the raw-conversation evidence-note updater for a memory retrieval system.
 
-Your job is to read selected L2 evidence, selected L1 windows, and linked raw L0 conversations, then choose whether raw L0 detail is enough.
+Your job is to read the current evidence note, selected L2 evidence, selected L1 windows, and linked raw L0 conversations, then update the note and choose whether raw L0 detail is enough.
 
 Rules:
-- Choose only the L0 sessions that materially help answer the query.
+- current_evidence_note is the note produced by earlier hops. Refine it with exact conversation details when useful.
 - Use raw L0 only when exact prior wording, exact recommendation, exact names, or other conversation-level detail is needed.
+- evidence_note should be the best final note after incorporating L0 detail.
 - If one or more selected L0 sessions contain the needed detail, set enough_at="l0".
 - Otherwise set enough_at="none".
 - Return JSON only.
 
 Use this exact JSON shape:
 {
-  "selected_l0_ids": ["l0 id"],
+  "evidence_note": "final note from L0 evidence",
   "enough_at": "l0 | none"
 }
 `.trim();
@@ -899,8 +918,10 @@ function buildGlobalProfilePrompt(input: LlmGlobalProfileInput): string {
 }
 
 function buildHop1RoutePrompt(input: LlmMemoryRouteInput): string {
+  const currentLocalDate = new Date().toLocaleDateString("en-CA");
   return JSON.stringify({
     query: input.query,
+    current_local_date: currentLocalDate,
     global_profile: input.profile
       ? {
           id: input.profile.recordId,
@@ -922,6 +943,12 @@ function buildHop2L2Prompt(input: LlmHop2L2Input): string {
     lookup_queries: input.lookupQueries.map((entry) => ({
       target_types: entry.targetTypes,
       lookup_query: truncateForPrompt(entry.lookupQuery, 120),
+      time_range: entry.timeRange
+        ? {
+            start_date: entry.timeRange.startDate,
+            end_date: entry.timeRange.endDate,
+          }
+        : null,
     })),
     catalog_truncated: Boolean(input.catalogTruncated),
     l2_entries: input.l2Entries.map((item) => ({
@@ -937,12 +964,7 @@ function buildHop2L2Prompt(input: LlmHop2L2Input): string {
 function buildHop3L1Prompt(input: LlmHop3L1Input): string {
   return JSON.stringify({
     query: input.query,
-    global_profile: input.profile
-      ? {
-          id: input.profile.recordId,
-          text: truncateForPrompt(input.profile.profileText, 220),
-        }
-      : null,
+    current_evidence_note: truncateForPrompt(input.evidenceNote, 320),
     selected_l2_entries: input.selectedL2Entries.map((item) => ({
       id: item.id,
       type: item.type,
@@ -964,6 +986,7 @@ function buildHop3L1Prompt(input: LlmHop3L1Input): string {
 function buildHop4L0Prompt(input: LlmHop4L0Input): string {
   return JSON.stringify({
     query: input.query,
+    current_evidence_note: truncateForPrompt(input.evidenceNote, 360),
     selected_l2_entries: input.selectedL2Entries.map((item) => ({
       id: item.id,
       type: item.type,
@@ -1113,6 +1136,22 @@ function truncateForPrompt(value: string, maxLength: number): string {
   return truncate(normalizeWhitespace(value), maxLength);
 }
 
+function normalizeDateKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function normalizeTimeRange(value: unknown): { startDate: string; endDate: string } | null {
+  if (!isRecord(value)) return null;
+  const startDate = normalizeDateKey(value.start_date);
+  const endDate = normalizeDateKey(value.end_date);
+  if (!startDate || !endDate) return null;
+  return startDate <= endDate
+    ? { startDate, endDate }
+    : { startDate: endDate, endDate: startDate };
+}
+
 function normalizeStringArray(items: unknown, maxItems: number): string[] {
   if (!Array.isArray(items)) return [];
   return items
@@ -1158,11 +1197,12 @@ function normalizeLookupQueries(value: unknown, defaultQuery: string, maxItems =
     return [{
       targetTypes: ["time", "project"],
       lookupQuery: defaultQuery,
+      timeRange: null,
     }];
   }
   const normalized = value
     .filter(isRecord)
-    .map((item) => {
+    .map((item): LookupQuerySpec | undefined => {
       const targetTypes = normalizeLookupTargetTypes(item.target_types);
       const lookupQuery = typeof item.lookup_query === "string"
         ? truncateForPrompt(item.lookup_query, 120)
@@ -1171,6 +1211,7 @@ function normalizeLookupQueries(value: unknown, defaultQuery: string, maxItems =
       return {
         targetTypes,
         lookupQuery,
+        timeRange: normalizeTimeRange(item.time_range),
       };
     })
     .filter((item): item is LookupQuerySpec => Boolean(item));
@@ -1178,6 +1219,7 @@ function normalizeLookupQueries(value: unknown, defaultQuery: string, maxItems =
   return [{
     targetTypes: ["time", "project"],
     lookupQuery: defaultQuery,
+    timeRange: null,
   }];
 }
 
@@ -1191,6 +1233,15 @@ function uniqueById<T>(items: T[], getId: (item: T) => string): T[] {
     next.push(item);
   }
   return next;
+}
+
+function fallbackEvidenceNote(lines: string[], fallback = ""): string {
+  const normalized = lines
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean)
+    .slice(0, 8);
+  const joined = normalized.join("\n");
+  return truncate(joined || normalizeWhitespace(fallback), 800);
 }
 
 function extractChatCompletionsText(payload: unknown): string {
@@ -1732,6 +1783,7 @@ export class LlmMemoryExtractor {
         lookupQueries: [{
           targetTypes: ["time", "project"],
           lookupQuery: defaultQuery,
+          timeRange: null,
         }],
       };
     }
@@ -1752,7 +1804,7 @@ export class LlmMemoryExtractor {
         : "none";
       return {
         intent: normalizeIntent(parsed.intent),
-        selectedL2Ids: normalizeStringArray(parsed.selected_l2_ids, input.l2Entries.length),
+        evidenceNote: typeof parsed.evidence_note === "string" ? truncate(normalizeWhitespace(parsed.evidence_note), 800) : "",
         enoughAt,
       };
     } catch (error) {
@@ -1764,64 +1816,29 @@ export class LlmMemoryExtractor {
     if (input.l2Entries.length === 0) {
       return {
         intent: input.profile ? "fact" : "general",
-        selectedL2Ids: [],
+        evidenceNote: "",
         enoughAt: "none",
       };
     }
     try {
       return await this.runL2SelectionOnce(input);
     } catch (error) {
+      this.logger?.warn?.(`[clawxmemory] hop2 l2 fallback: ${String(error)}`);
       const hasTime = input.l2Entries.some((entry) => entry.type === "time");
       const hasProject = input.l2Entries.some((entry) => entry.type === "project");
-      if (hasTime && hasProject && !isTimeoutError(error)) {
-        try {
-          const baseTimeoutMs = typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs)
-            ? input.timeoutMs
-            : 5_000;
-          const splitTimeoutMs = baseTimeoutMs > 0
-            ? Math.min(baseTimeoutMs, Math.max(300, Math.floor(baseTimeoutMs / 2)))
-            : 0;
-          const [timeDecision, projectDecision] = await Promise.all([
-            this.runL2SelectionOnce({
-              ...input,
-              l2Entries: input.l2Entries.filter((entry) => entry.type === "time"),
-              timeoutMs: splitTimeoutMs,
-            }),
-            this.runL2SelectionOnce({
-              ...input,
-              l2Entries: input.l2Entries.filter((entry) => entry.type === "project"),
-              timeoutMs: splitTimeoutMs,
-            }),
-          ]);
-          const selectedL2Ids = normalizeStringArray(
-            [...timeDecision.selectedL2Ids, ...projectDecision.selectedL2Ids],
-            input.l2Entries.length,
-          );
-          const enoughAt = timeDecision.enoughAt === "descend_l1" || projectDecision.enoughAt === "descend_l1"
-            ? "descend_l1"
-            : selectedL2Ids.length > 0 && (timeDecision.enoughAt === "l2" || projectDecision.enoughAt === "l2")
-              ? "l2"
-              : "none";
-          const intent = selectedL2Ids.length > 0 && timeDecision.selectedL2Ids.length > 0 && projectDecision.selectedL2Ids.length > 0
-            ? "general"
-            : timeDecision.selectedL2Ids.length > 0
-              ? timeDecision.intent
-              : projectDecision.selectedL2Ids.length > 0
-                ? projectDecision.intent
-                : input.profile ? "fact" : "general";
-          return {
-            intent,
-            selectedL2Ids,
-            enoughAt,
-          };
-        } catch (splitError) {
-          this.logger?.warn?.(`[clawxmemory] hop2 l2 split fallback failed: ${String(splitError)}`);
-        }
-      }
-      this.logger?.warn?.(`[clawxmemory] hop2 l2 fallback: ${String(error)}`);
+      const intent = hasTime && hasProject
+        ? "general"
+        : hasTime
+          ? "time"
+          : hasProject
+            ? "project"
+            : input.profile ? "fact" : "general";
       return {
-        intent: input.profile ? "fact" : "general",
-        selectedL2Ids: [],
+        intent,
+        evidenceNote: fallbackEvidenceNote(
+          input.l2Entries.map((entry) => `${entry.label}: ${entry.compressedContent}`),
+          input.query,
+        ),
         enoughAt: "none",
       };
     }
@@ -1830,8 +1847,7 @@ export class LlmMemoryExtractor {
   async selectL1FromEvidence(input: LlmHop3L1Input): Promise<Hop3L1Decision> {
     if (input.l1Windows.length === 0) {
       return {
-        useProfile: Boolean(input.profile?.profileText.trim()),
-        selectedL1Ids: [],
+        evidenceNote: input.evidenceNote,
         enoughAt: "none",
       };
     }
@@ -1848,15 +1864,21 @@ export class LlmMemoryExtractor {
         ? parsed.enough_at
         : "none";
       return {
-        useProfile: normalizeBoolean(parsed.use_profile, Boolean(input.profile?.profileText.trim())),
-        selectedL1Ids: normalizeStringArray(parsed.selected_l1_ids, input.l1Windows.length),
+        evidenceNote: typeof parsed.evidence_note === "string"
+          ? truncate(normalizeWhitespace(parsed.evidence_note), 800)
+          : input.evidenceNote,
         enoughAt,
       };
     } catch (error) {
       this.logger?.warn?.(`[clawxmemory] hop3 l1 fallback: ${String(error)}`);
       return {
-        useProfile: Boolean(input.profile?.profileText.trim()),
-        selectedL1Ids: [],
+        evidenceNote: fallbackEvidenceNote(
+          [
+            input.evidenceNote,
+            ...input.l1Windows.map((item) => `${item.timePeriod}: ${item.summary} ${item.situationTimeInfo}`),
+          ],
+          input.query,
+        ),
         enoughAt: "none",
       };
     }
@@ -1865,7 +1887,7 @@ export class LlmMemoryExtractor {
   async selectL0FromEvidence(input: LlmHop4L0Input): Promise<Hop4L0Decision> {
     if (input.l0Sessions.length === 0) {
       return {
-        selectedL0Ids: [],
+        evidenceNote: input.evidenceNote,
         enoughAt: "none",
       };
     }
@@ -1882,13 +1904,24 @@ export class LlmMemoryExtractor {
         ? parsed.enough_at
         : "none";
       return {
-        selectedL0Ids: normalizeStringArray(parsed.selected_l0_ids, input.l0Sessions.length),
+        evidenceNote: typeof parsed.evidence_note === "string"
+          ? truncate(normalizeWhitespace(parsed.evidence_note), 800)
+          : input.evidenceNote,
         enoughAt,
       };
     } catch (error) {
       this.logger?.warn?.(`[clawxmemory] hop4 l0 fallback: ${String(error)}`);
       return {
-        selectedL0Ids: [],
+        evidenceNote: fallbackEvidenceNote(
+          [
+            input.evidenceNote,
+            ...input.l0Sessions.map((item) => {
+              const preview = item.messages.slice(-3).map((message) => `${message.role}: ${message.content}`).join(" | ");
+              return `${item.timestamp}: ${preview}`;
+            }),
+          ],
+          input.query,
+        ),
         enoughAt: "none",
       };
     }

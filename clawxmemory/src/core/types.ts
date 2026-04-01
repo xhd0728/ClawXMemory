@@ -27,7 +27,7 @@ export type ReasoningMode = "answer_first" | "accuracy_first";
 
 export interface IndexingSettings {
   reasoningMode: ReasoningMode;
-  maxAutoReplyLatencyMs: number;
+  recallTopK: number;
 }
 
 export interface ActiveTopicBufferRecord {
@@ -162,6 +162,7 @@ export interface RetrievalResult {
   intent: IntentType;
   enoughAt: "profile" | "l2" | "l1" | "l0" | "none";
   profile: GlobalProfileRecord | null;
+  evidenceNote: string;
   l2Results: L2SearchResult[];
   l1Results: L1SearchResult[];
   l0Results: L0SearchResult[];
