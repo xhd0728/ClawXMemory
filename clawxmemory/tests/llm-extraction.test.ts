@@ -78,13 +78,54 @@ describe("LlmMemoryExtractor hop debug trace", () => {
     expect(result.lookupQueries[0]?.lookupQuery).toBe("天津旅游规划");
     expect(debugTrace).toHaveBeenCalledWith(expect.objectContaining({
       requestLabel: "Hop1 lookup",
-      systemPrompt: expect.stringContaining("第一跳规划器"),
+      systemPrompt: expect.stringContaining("first-hop planner"),
       userPrompt: expect.stringContaining("current_local_date"),
       rawResponse: expect.stringContaining("lookup_queries"),
       parsedResult: expect.objectContaining({
         base_only: false,
       }),
     }));
+  });
+
+  it("emits full prompt debug on successful hop2 parsing with english scaffolding", async () => {
+    const extractor = createExtractor();
+    const debugTrace = vi.fn();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue(JSON.stringify({
+        intent: "project",
+        evidence_note: "The user is actively planning a budget Tianjin trip for the Qingming holiday.",
+        enough_at: "l2",
+      }));
+
+    const result = await extractor.selectL2FromCatalog({
+      query: "我对于天津旅游的规划是什么",
+      profile: createProfile(),
+      lookupQueries: [
+        {
+          targetTypes: ["project"],
+          lookupQuery: "天津旅游规划",
+          timeRange: null,
+        },
+      ],
+      l2Entries: [
+        {
+          id: "l2-project-1",
+          type: "project",
+          label: "天津穷游攻略",
+          lookupKeys: ["天津", "穷游"],
+          compressedContent: "正在推进天津穷游路线和预算整理。",
+        },
+      ],
+      debugTrace,
+    });
+
+    expect(result.enoughAt).toBe("l2");
+    expect(debugTrace).toHaveBeenCalledWith(expect.objectContaining({
+      requestLabel: "Hop2 L2 selection",
+      systemPrompt: expect.stringContaining("second-hop planner"),
+      rawResponse: expect.stringContaining("evidence_note"),
+    }));
+    expect(debugTrace.mock.calls[0]?.[0]?.systemPrompt).not.toContain("第二跳规划器");
   });
 
   it("emits errored prompt debug when raw hop output cannot be parsed", async () => {

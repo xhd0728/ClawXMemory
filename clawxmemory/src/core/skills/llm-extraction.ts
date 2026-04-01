@@ -319,7 +319,7 @@ Rules:
 - Natural-language output fields must use the dominant language of the user messages. If user messages are mixed, prefer the most recent user language. Keys and enums must stay in English.
 - Each project summary must be a compact 1-2 sentence project memory, not a generic status line.
 - A good project summary should preserve: what the project is, what stage it is in now, and the next step / blocker / missing info when available.
-- Do not output vague summaries like "用户正在推进这个项目", "进展顺利", "还可以", or "正在处理某事" unless the project-specific context is also included.
+- Do not output vague summaries like "the user is working on this project", "progress is going well", "things are okay", or "handling something" unless the project-specific context is also included.
 - latest_progress must stay short and only capture the newest meaningful update, newest blocker, or newest confirmation state.
 - Return valid JSON only. No markdown fences, no commentary.
 
@@ -400,7 +400,7 @@ Rules:
 - Example pair of separate projects in one window: "friend's stomach illness and medicine follow-up" plus "EMNLP submission preparation".
 - Merge duplicates caused by wording differences.
 - For each project summary, write a compact 1-2 sentence project memory that explains what the project is, what phase it is in, and the next step / blocker / missing info when available.
-- Do not flatten summaries into generic text like "用户正在做某事", "进展还可以", or "正在推进".
+- Do not flatten summaries into generic text like "the user is working on something", "progress is okay", or "making progress".
 - latest_progress should stay short and only describe the newest concrete update.
 - Return JSON only.
 
@@ -466,7 +466,7 @@ Rules:
   3. the current phase,
   4. the next step / blocker / missing info when present.
 - latest_progress must stay short and only describe the newest meaningful update, blocker, or confirmation state.
-- Do not output generic summaries like "用户正在推进这个项目", "进展顺利", "还可以", or "正在处理某事" unless the project-specific context is explicitly preserved.
+- Do not output generic summaries like "the user is working on this project", "progress is going well", "things are okay", or "handling something" unless the project-specific context is explicitly preserved.
 - Keep each project's incoming key stable.
 - Natural-language output must follow the language used by the user in the new L1 window.
 - Return JSON only.
@@ -511,7 +511,7 @@ Your job is to decide which memory records are relevant to the user's query.
 Rules:
 - Use semantic meaning, not keyword overlap.
 - Use high recall for obvious paraphrases and near-synonyms.
-- Temporal summary questions like "我今天都在忙什么", "今天发生了什么", "我最近在做什么", "what was I doing today", or "what happened recently" should usually select L2 time indexes.
+- Temporal summary questions asking what the user did today, what happened today, or what they were recently working on should usually select L2 time indexes.
 - If there is a current-day or recent-day L2 time summary and the user asks about today/recent activity, prefer that L2 time record even if wording differs.
 - For project queries, prefer L2 project indexes when they already capture enough.
 - For time queries, prefer L2 time indexes when they already capture enough.
@@ -535,53 +535,53 @@ Use this exact JSON shape:
 `.trim();
 
 const HOP1_LOOKUP_SYSTEM_PROMPT = `
-你是记忆检索系统的第一跳规划器。
+You are the first-hop planner for a memory retrieval system.
 
-你的任务不是选具体索引，而是判断：
-1. 这个问题是否需要动态记忆
-2. 如果需要，后续应该朝哪个索引类型查
-3. 后续应该带什么查询词去查
+Your job is not to choose concrete record ids. Your job is to decide:
+1. whether this question needs dynamic memory,
+2. which index types the next step should search,
+3. which lookup query terms should be used for that search.
 
-规则：
-- 以语义为准，不要做表面关键词匹配。
-- 输入里的 current_local_date 是当前本地日期，格式为 YYYY-MM-DD。
-- 输入里的 global_profile 是顶层稳定画像。
-- 如果问题仅靠 global_profile 就能回答，必须设为 base_only=true。
-- 典型 base_only 问题：
-  - 用户身份、偏好、习惯、长期属性
-  - 例如："我喜欢用什么语言交流"
-  - 例如："我平时喜欢吃什么"
-  - 例如："介绍一下我"
-  - 例如："良子是谁"
-  - 例如："你还记得我吗"
-- 只要问题在问某一天发生了什么、最近做了什么、今天在忙什么、某个项目最近进展如何、之前推荐过什么，base_only 就必须是 false。
-- 如果 base_only=false，你必须输出至少一条 lookup_queries。
-- 如果 base_only=true，lookup_queries 必须是空数组。
-- mixed question 可以同时涉及时间和项目，此时 target_types 可以是 ["time","project"]。
-- lookup_query 要写成后续检索可用的短查询词，而不是复述整段规则。
-- 只有当问题真的与时间范围相关时，才输出 time_range。
-- time_range 必须规范化为本地日期范围，格式:
+Rules:
+- Use semantic meaning, not surface keyword matching.
+- current_local_date is the current local date in YYYY-MM-DD format.
+- global_profile is the top-level stable profile.
+- If the question can be answered from global_profile alone, you must set base_only=true.
+- Typical base_only questions include:
+  - user identity, preferences, habits, and long-term traits
+  - for example: "What language do I prefer to use?"
+  - for example: "What food do I usually like?"
+  - for example: "Introduce me."
+  - for example: "Who is Liangzi?"
+  - for example: "Do you still remember me?"
+- If the question asks what happened on a certain day, what happened recently, what the user was busy with today, how a project has progressed recently, or what was recommended earlier, base_only must be false.
+- If base_only=false, you must output at least one lookup_queries entry.
+- If base_only=true, lookup_queries must be an empty array.
+- A mixed question can involve both time and project retrieval, so target_types may be ["time","project"].
+- lookup_query should be a short search phrase usable by the retrieval step, not a restatement of the full rule.
+- Only output time_range when the question is truly about a time range.
+- time_range must be normalized to a local date range in this exact format:
   { "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD" }
-- "今天"、"昨天"、"最近一周"、"上个月"、"3月16日到3月18日" 这类问题都应尽量转成明确日期范围。
-- 如果是项目问题但同时限定了时间，也可以在同一条 lookup_query 里同时给 target_types=["time","project"] 并附带 time_range。
-- 不要在这一跳选择具体记录 id。
-- 只返回 JSON，不要返回解释。
+- Expressions like "today", "yesterday", "the last week", "last month", or "from March 16 to March 18" should be normalized into explicit date ranges whenever possible.
+- If the question is project-related and also time-bounded, a single lookup_query may use target_types=["time","project"] and include time_range.
+- Do not choose concrete record ids at this hop.
+- Return JSON only. Do not explain.
 
-重点示例：
-- Query: "我喜欢用什么语言交流"
+Examples:
+- Query: "What language do I prefer to use?"
   -> memory_relevant=true, base_only=true, lookup_queries=[]
-- Query: "介绍一下我"
+- Query: "Introduce me."
   -> memory_relevant=true, base_only=true, lookup_queries=[]
-- Query: "良子是谁"
+- Query: "Who is Liangzi?"
   -> memory_relevant=true, base_only=true, lookup_queries=[]
-- Query: "我今天都在忙什么"
-  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time"],"lookup_query":"今天做了什么","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
-- Query: "我今天论文进展怎么样"
-  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time","project"],"lookup_query":"今天 EMNLP 论文进展","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
-- Query: "你之前推荐我的北京烧烤店是哪家"
-  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["project"],"lookup_query":"北京 烧烤店 推荐"}]
+- Query: "What was I busy with today?"
+  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time"],"lookup_query":"what I did today","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
+- Query: "How is my paper progressing today?"
+  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time","project"],"lookup_query":"today EMNLP paper progress","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
+- Query: "Which Beijing barbecue place did you recommend before?"
+  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["project"],"lookup_query":"Beijing barbecue recommendation"}]
 
-严格使用这个 JSON 结构：
+Use this exact JSON shape:
 {
   "memory_relevant": true,
   "base_only": false,
@@ -599,37 +599,37 @@ const HOP1_LOOKUP_SYSTEM_PROMPT = `
 `.trim();
 
 const HOP2_L2_SYSTEM_PROMPT = `
-你是记忆检索系统的第二跳规划器。
+You are the second-hop planner for a memory retrieval system.
 
-你现在已经看到了代码侧确定选出的真实 L2 索引内容。你的任务是：
-1. 读取这些 L2 证据
-2. 生成一段与当前问题直接相关的 evidence_note
-3. 判断停在 L2 是否已经足够；如果不够，再决定继续下钻到 L1
+You have already received the real L2 entries selected by code-side retrieval. Your job is to:
+1. read the L2 evidence,
+2. write an evidence_note directly relevant to the current question,
+3. decide whether stopping at L2 is sufficient, or whether the system should descend to L1.
 
-规则：
-- l2_entries 不是目录名，它们已经包含压缩后的真实 L2 内容。
-- 以语义为准，不要做表面关键词匹配。
-- evidence_note 必须是紧凑的知识笔记，只保留与回答问题有关的信息，不要复述所有条目。
-- 如果 L2 已经足够回答，就设 enough_at="l2"。
-- 如果 L2 相关但还不够，需要看它 link 到的 L1，就设 enough_at="descend_l1"。
-- 只有在 L2 真的帮不上忙时，才设 enough_at="none"。
-- 如果问题是稳定画像类问题，例如语言偏好、长期身份、交流风格，而 global_profile 已经足够，就让 evidence_note 为空并设 enough_at="none"。
-- mixed question 可以同时选中时间 L2 和项目 L2。
-- 如果 exact answer 已经直接出现在项目 L2 的 latest progress 或 summary 里，就可以停在 L2，不需要强行下钻。
-- catalog_truncated=true 只表示为了 prompt 预算省略了一些更旧条目，不表示当前条目不可靠。
-- 只返回 JSON，不要解释。
+Rules:
+- l2_entries are not catalog names. They already contain the compressed real L2 content.
+- Use semantic meaning, not surface keyword matching.
+- evidence_note must be a compact knowledge note that keeps only information relevant to answering the current query. Do not restate every entry.
+- If L2 already answers the query, set enough_at="l2".
+- If L2 is relevant but still insufficient and linked L1 windows should be read, set enough_at="descend_l1".
+- Only set enough_at="none" when L2 genuinely does not help.
+- If the query is about stable profile information, such as language preference, long-term identity, or communication style, and global_profile is already sufficient, leave evidence_note empty and set enough_at="none".
+- A mixed question may include both time L2 and project L2 evidence.
+- If an exact answer already appears in a project L2 latest_progress or summary, you may stop at L2 instead of forcing a descent.
+- catalog_truncated=true only means older entries were omitted for prompt budget reasons; it does not make the current entries unreliable.
+- Return JSON only. Do not explain.
 
-重点示例：
-- Query: "我喜欢用什么语言交流"
+Examples:
+- Query: "What language do I prefer to use?"
   -> evidence_note="", enough_at="none"
-- Query: "我今天都在忙什么"
-  -> 从今天的 time L2 提炼出今天在忙什么的 evidence_note，enough_at="l2"
-- Query: "我今天论文进展怎么样"
-  -> 将今天的 time L2 和相关 project L2 融合成一段 evidence_note
-- Query: "你之前推荐我的北京烧烤店是哪家"
-  -> 如果项目 L2 的 latest progress 已经列出店名，则 enough_at="l2"；如果没有 exact name，再设为 "descend_l1"
+- Query: "What was I busy with today?"
+  -> derive an evidence_note from today's time L2 and set enough_at="l2"
+- Query: "How is my paper progressing today?"
+  -> merge today's time L2 and the related project L2 into one evidence_note
+- Query: "Which Beijing barbecue place did you recommend before?"
+  -> if the exact venue name already appears in project L2 latest_progress, set enough_at="l2"; otherwise set enough_at="descend_l1"
 
-严格使用这个 JSON 结构：
+Use this exact JSON shape:
 {
   "intent": "time | project | fact | general",
   "evidence_note": "condensed note from L2 evidence",
@@ -1574,7 +1574,7 @@ export class LlmMemoryExtractor {
         input.currentTopicSummary
           || input.incomingUserTurns[input.incomingUserTurns.length - 1]
           || input.recentUserTurns[input.recentUserTurns.length - 1]
-          || "当前话题",
+          || "current topic",
       ),
       120,
     );
