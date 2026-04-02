@@ -10,6 +10,9 @@ describe("buildPluginConfig", () => {
     expect(config.defaultIndexingSettings).toEqual({
       reasoningMode: "answer_first",
       recallTopK: 10,
+      autoIndexIntervalMinutes: 60,
+      autoDreamIntervalMinutes: 360,
+      autoDreamMinNewL1: 10,
     });
   });
 

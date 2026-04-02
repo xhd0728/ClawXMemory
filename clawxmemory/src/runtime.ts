@@ -45,9 +45,13 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 const MEMORY_REPAIR_VERSION = "2026-03-24-recall-injection-cleanup-v15";
-const INDEXING_SETTINGS_MIGRATION_VERSION = "2026-04-01-recall-topk-settings-v2";
+const INDEXING_SETTINGS_MIGRATION_VERSION = "2026-04-02-auto-dream-settings-v3";
 const PLUGIN_ID = "openbmb-clawxmemory";
 const NATIVE_MEMORY_PLUGIN_ID = "memory-core";
+const LAST_DREAM_AT_STATE_KEY = "lastDreamAt";
+const LAST_DREAM_STATUS_STATE_KEY = "lastDreamStatus";
+const LAST_DREAM_SUMMARY_STATE_KEY = "lastDreamSummary";
+const LAST_DREAM_L1_ENDED_AT_STATE_KEY = "lastDreamL1EndedAt";
 const CHAT_FACING_MEMORY_TOOLS = ["memory_overview", "memory_list", "memory_flush"] as const;
 const MANAGED_BOUNDARY_RESTART_TIMEOUT_MS = process.platform === "win32" ? 15_000 : 8_000;
 const RECENT_INBOUND_TTL_MS = 30_000;
@@ -553,7 +557,8 @@ export class MemoryPluginRuntime {
   private readonly recentCaseIds: string[] = [];
   private readonly activeCaseIdByRawSession = new Map<string, string>();
 
-  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  private autoIndexTimer: ReturnType<typeof setInterval> | undefined;
+  private autoDreamTimer: ReturnType<typeof setInterval> | undefined;
   private uiServer: LocalUiServer | undefined;
   private queuePromise: Promise<HeartbeatStats> | undefined;
   private activeSessionKey: string | undefined;
@@ -854,7 +859,7 @@ export class MemoryPluginRuntime {
   start(): void {
     if (this.started || this.stopped) return;
     this.started = true;
-    this.rescheduleHeartbeat();
+    this.rescheduleBackgroundTasks();
     this.uiServer?.start();
     void this.runStartupInitialization();
   }
@@ -863,10 +868,7 @@ export class MemoryPluginRuntime {
     if (this.stopped) return;
     this.stopped = true;
     this.started = false;
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = undefined;
-    }
+    this.clearBackgroundTimers();
     for (const sessionKey of Array.from(this.idleIndexTimers.keys())) {
       this.clearIdleTimer(sessionKey);
     }
@@ -1459,21 +1461,37 @@ export class MemoryPluginRuntime {
     return this.queuePromise;
   }
 
-  private rescheduleHeartbeat(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = undefined;
+  private clearBackgroundTimers(): void {
+    if (this.autoIndexTimer) {
+      clearInterval(this.autoIndexTimer);
+      this.autoIndexTimer = undefined;
     }
-    const intervalMinutes = this.config.autoIndexIntervalMinutes;
-    if (intervalMinutes <= 0) return;
-    this.heartbeatTimer = setInterval(() => {
-      for (const sessionKey of Array.from(this.debouncedSessions)) {
-        this.clearIdleTimer(sessionKey);
-      }
-      void this.requestIndexRun("scheduled").catch((error) => {
-        this.logger.warn?.(`[clawxmemory] scheduled index failed: ${String(error)}`);
-      });
-    }, intervalMinutes * 60_000);
+    if (this.autoDreamTimer) {
+      clearInterval(this.autoDreamTimer);
+      this.autoDreamTimer = undefined;
+    }
+  }
+
+  private rescheduleBackgroundTasks(): void {
+    this.clearBackgroundTimers();
+    const settings = this.indexer.getSettings();
+    if (settings.autoIndexIntervalMinutes > 0) {
+      this.autoIndexTimer = setInterval(() => {
+        for (const sessionKey of Array.from(this.debouncedSessions)) {
+          this.clearIdleTimer(sessionKey);
+        }
+        void this.requestIndexRun("scheduled").catch((error) => {
+          this.logger.warn?.(`[clawxmemory] scheduled index failed: ${String(error)}`);
+        });
+      }, settings.autoIndexIntervalMinutes * 60_000);
+    }
+    if (settings.autoDreamIntervalMinutes > 0) {
+      this.autoDreamTimer = setInterval(() => {
+        void this.runDreamNow("scheduled").catch((error) => {
+          this.logger.warn?.(`[clawxmemory] scheduled dream failed: ${String(error)}`);
+        });
+      }, settings.autoDreamIntervalMinutes * 60_000);
+    }
   }
 
   private applyIndexingSettings(partial: Partial<IndexingSettings>): IndexingSettings {
@@ -1485,8 +1503,71 @@ export class MemoryPluginRuntime {
       this.config.defaultIndexingSettings,
     );
     this.indexer.setSettings(merged);
-    this.rescheduleHeartbeat();
+    this.rescheduleBackgroundTasks();
     return merged;
+  }
+
+  private getLatestL1EndedAt(): string | undefined {
+    const windows = this.repository.listAllL1();
+    if (windows.length === 0) return undefined;
+    return windows[windows.length - 1]?.endedAt || undefined;
+  }
+
+  private getNewL1CountSinceLastSuccessfulDream(): { count: number; latestEndedAt?: string } {
+    const cutoff = this.repository.getPipelineState(LAST_DREAM_L1_ENDED_AT_STATE_KEY)?.trim() || "";
+    const windows = this.repository.listAllL1();
+    let latestEndedAt: string | undefined;
+    let count = 0;
+    for (const window of windows) {
+      if (!latestEndedAt || window.endedAt > latestEndedAt) {
+        latestEndedAt = window.endedAt;
+      }
+      if (!cutoff || window.endedAt > cutoff) {
+        count += 1;
+      }
+    }
+    return {
+      count,
+      ...(latestEndedAt ? { latestEndedAt } : {}),
+    };
+  }
+
+  private recordDreamLifecycle(
+    status: "running" | "success" | "skipped" | "failed",
+    summary: string,
+    options?: { completedAt?: string; latestL1EndedAt?: string },
+  ): void {
+    this.repository.setPipelineState(LAST_DREAM_STATUS_STATE_KEY, status);
+    this.repository.setPipelineState(LAST_DREAM_SUMMARY_STATE_KEY, summary.trim());
+    if (options?.completedAt) {
+      this.repository.setPipelineState(LAST_DREAM_AT_STATE_KEY, options.completedAt);
+    }
+    if (options?.latestL1EndedAt) {
+      this.repository.setPipelineState(LAST_DREAM_L1_ENDED_AT_STATE_KEY, options.latestL1EndedAt);
+    }
+  }
+
+  private buildSkippedDreamResult(
+    trigger: "manual" | "scheduled",
+    prepFlush: HeartbeatStats,
+    summary: string,
+    skipReason: string,
+  ): DreamRunResult {
+    return {
+      prepFlush,
+      reviewedL1: 0,
+      rewrittenProjects: 0,
+      deletedProjects: 0,
+      profileUpdated: false,
+      duplicateTopicCount: 0,
+      conflictTopicCount: 0,
+      prunedProjectL1Refs: 0,
+      prunedProfileL1Refs: 0,
+      summary,
+      trigger,
+      status: "skipped",
+      skipReason,
+    };
   }
 
   private scheduleIdleIndex(sessionKey: string): void {
@@ -1515,26 +1596,60 @@ export class MemoryPluginRuntime {
     return this.requestIndexRun(reason, undefined, options);
   }
 
-  private async runDreamNow(trigger: "manual"): Promise<DreamRunResult> {
+  private async runDreamNow(trigger: "manual" | "scheduled"): Promise<DreamRunResult> {
     if (this.dreamRunLocked || this.dreamRunPromise) {
+      if (trigger === "scheduled") {
+        return this.buildSkippedDreamResult(
+          trigger,
+          emptyStats(),
+          "Skipped automatic Dream because another Dream reconstruction is already running.",
+          "already_running",
+        );
+      }
       throw new Error("Dream reconstruction is already running");
     }
 
     this.dreamRunLocked = true;
     const promise = (async () => {
+      this.recordDreamLifecycle(
+        "running",
+        trigger === "scheduled" ? "Automatic Dream is running." : "Manual Dream is running.",
+      );
       if (this.queuePromise) {
         await this.queuePromise;
       }
       const prepFlush = await this.flushAllNow("dream_prep", { allowWhileDream: true });
+      if (trigger === "scheduled") {
+        const settings = this.indexer.getSettings();
+        const { count: newL1Count } = this.getNewL1CountSinceLastSuccessfulDream();
+        if (newL1Count < settings.autoDreamMinNewL1) {
+          const summary = `Skipped automatic Dream: ${newL1Count} new L1 windows since the last successful Dream, below threshold ${settings.autoDreamMinNewL1}.`;
+          this.recordDreamLifecycle("skipped", summary, { completedAt: nowIso() });
+          return this.buildSkippedDreamResult(trigger, prepFlush, summary, "new_l1_below_threshold");
+        }
+      }
       const outcome = await this.dreamRewriter.run();
+      const latestL1EndedAt = this.getLatestL1EndedAt();
+      this.recordDreamLifecycle("success", outcome.summary, {
+        completedAt: nowIso(),
+        ...(latestL1EndedAt ? { latestL1EndedAt } : {}),
+      });
       this.logger.info?.(
         `[clawxmemory] dream run(${trigger}) reviewed_l1=${outcome.reviewedL1} rewritten_projects=${outcome.rewrittenProjects} deleted_projects=${outcome.deletedProjects} profile_updated=${outcome.profileUpdated}`,
       );
-      return {
+      const result: DreamRunResult = {
         prepFlush,
         ...outcome,
+        trigger,
+        status: "success" as const,
       };
-    })().finally(() => {
+      return result;
+    })().catch((error) => {
+      this.recordDreamLifecycle("failed", `Dream ${trigger} failed: ${String(error)}`, {
+        completedAt: nowIso(),
+      });
+      throw error;
+    }).finally(() => {
       this.dreamRunPromise = undefined;
       this.dreamRunLocked = false;
       if ((this.queuedFullRun || this.queuedSessionKeys.size > 0) && !this.queuePromise) {

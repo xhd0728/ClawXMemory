@@ -590,6 +590,12 @@ body[data-nav="open"] .app-scrim {
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
+.popover-note {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
 /* ── Accent color picker ─────────────────────────── */
 
 .accent-picker {

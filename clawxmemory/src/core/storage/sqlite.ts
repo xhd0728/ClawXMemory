@@ -32,6 +32,10 @@ type SearchIdHit = { id: string; score: number };
 const GLOBAL_PROFILE_RECORD_ID = "global_profile_record" as const;
 const INDEXING_SETTINGS_STATE_KEY = "indexingSettings" as const;
 const LAST_INDEXED_AT_STATE_KEY = "lastIndexedAt" as const;
+const LAST_DREAM_AT_STATE_KEY = "lastDreamAt" as const;
+const LAST_DREAM_STATUS_STATE_KEY = "lastDreamStatus" as const;
+const LAST_DREAM_SUMMARY_STATE_KEY = "lastDreamSummary" as const;
+const LAST_DREAM_L1_ENDED_AT_STATE_KEY = "lastDreamL1EndedAt" as const;
 const RECENT_CASE_TRACES_STATE_KEY = "recentCaseTraces" as const;
 
 export class MemoryBundleValidationError extends Error {
@@ -430,9 +434,36 @@ function normalizeIndexingSettings(
           : typeof legacy?.recallBudgetMs === "number" && Number.isFinite(legacy.recallBudgetMs)
             ? Math.max(1, Math.min(50, Math.round(legacy.recallBudgetMs / 180)))
             : defaults.recallTopK;
+  const rawAutoIndexIntervalMinutes = typeof input?.autoIndexIntervalMinutes === "number"
+    && Number.isFinite(input.autoIndexIntervalMinutes)
+    ? input.autoIndexIntervalMinutes
+    : typeof legacy?.autoIndexIntervalMinutes === "number" && Number.isFinite(legacy.autoIndexIntervalMinutes)
+      ? legacy.autoIndexIntervalMinutes
+      : typeof legacy?.autoIndexIntervalMinutes === "string" && legacy.autoIndexIntervalMinutes.trim()
+        ? Number.parseInt(legacy.autoIndexIntervalMinutes, 10)
+        : defaults.autoIndexIntervalMinutes;
+  const rawAutoDreamIntervalMinutes = typeof input?.autoDreamIntervalMinutes === "number"
+    && Number.isFinite(input.autoDreamIntervalMinutes)
+    ? input.autoDreamIntervalMinutes
+    : typeof legacy?.autoDreamIntervalMinutes === "number" && Number.isFinite(legacy.autoDreamIntervalMinutes)
+      ? legacy.autoDreamIntervalMinutes
+      : typeof legacy?.autoDreamIntervalMinutes === "string" && legacy.autoDreamIntervalMinutes.trim()
+        ? Number.parseInt(legacy.autoDreamIntervalMinutes, 10)
+        : defaults.autoDreamIntervalMinutes;
+  const rawAutoDreamMinNewL1 = typeof input?.autoDreamMinNewL1 === "number"
+    && Number.isFinite(input.autoDreamMinNewL1)
+    ? input.autoDreamMinNewL1
+    : typeof legacy?.autoDreamMinNewL1 === "number" && Number.isFinite(legacy.autoDreamMinNewL1)
+      ? legacy.autoDreamMinNewL1
+      : typeof legacy?.autoDreamMinNewL1 === "string" && legacy.autoDreamMinNewL1.trim()
+        ? Number.parseInt(legacy.autoDreamMinNewL1, 10)
+        : defaults.autoDreamMinNewL1;
   return {
     reasoningMode,
     recallTopK: Math.max(1, Math.min(50, Math.floor(rawTopK))),
+    autoIndexIntervalMinutes: Math.max(0, Math.floor(rawAutoIndexIntervalMinutes)),
+    autoDreamIntervalMinutes: Math.max(0, Math.floor(rawAutoDreamIntervalMinutes)),
+    autoDreamMinNewL1: Math.max(0, Math.floor(rawAutoDreamMinNewL1)),
   };
 }
 
@@ -1378,7 +1409,10 @@ export class MemoryRepository {
       return Number(row?.total ?? 0);
     };
     const stateStmt = this.db.prepare("SELECT state_value FROM pipeline_state WHERE state_key = ?");
-    const state = stateStmt.get(LAST_INDEXED_AT_STATE_KEY) as { state_value?: string } | undefined;
+    const readState = (key: string): string | undefined => {
+      const row = stateStmt.get(key) as { state_value?: string } | undefined;
+      return typeof row?.state_value === "string" && row.state_value.trim() ? row.state_value : undefined;
+    };
     const profile = this.getGlobalProfileRecord();
     const overview: DashboardOverview = {
       totalL0: count("l0_sessions"),
@@ -1397,9 +1431,16 @@ export class MemoryRepository {
       recallTimeouts: 0,
       lastRecallMode: "none",
     };
-    if (state?.state_value) {
-      overview.lastIndexedAt = state.state_value;
-    }
+    const lastIndexedAt = readState(LAST_INDEXED_AT_STATE_KEY);
+    const lastDreamAt = readState(LAST_DREAM_AT_STATE_KEY);
+    const lastDreamStatus = readState(LAST_DREAM_STATUS_STATE_KEY);
+    const lastDreamSummary = readState(LAST_DREAM_SUMMARY_STATE_KEY);
+    const lastDreamL1EndedAt = readState(LAST_DREAM_L1_ENDED_AT_STATE_KEY);
+    if (lastIndexedAt) overview.lastIndexedAt = lastIndexedAt;
+    if (lastDreamAt) overview.lastDreamAt = lastDreamAt;
+    if (lastDreamStatus) overview.lastDreamStatus = lastDreamStatus as NonNullable<DashboardOverview["lastDreamStatus"]>;
+    if (lastDreamSummary) overview.lastDreamSummary = lastDreamSummary;
+    if (lastDreamL1EndedAt) overview.lastDreamL1EndedAt = lastDreamL1EndedAt;
     return overview;
   }
 
@@ -1623,8 +1664,12 @@ export class MemoryRepository {
         DELETE FROM l1_windows;
         UPDATE l0_sessions SET indexed = 0;
       `);
-      const clearLastIndexedStmt = this.db.prepare(`DELETE FROM pipeline_state WHERE state_key = ?`);
-      clearLastIndexedStmt.run("lastIndexedAt");
+      const clearStateStmt = this.db.prepare(`DELETE FROM pipeline_state WHERE state_key = ?`);
+      clearStateStmt.run(LAST_INDEXED_AT_STATE_KEY);
+      clearStateStmt.run(LAST_DREAM_AT_STATE_KEY);
+      clearStateStmt.run(LAST_DREAM_STATUS_STATE_KEY);
+      clearStateStmt.run(LAST_DREAM_SUMMARY_STATE_KEY);
+      clearStateStmt.run(LAST_DREAM_L1_ENDED_AT_STATE_KEY);
       this.saveGlobalProfileRecord({
         recordId: GLOBAL_PROFILE_RECORD_ID,
         profileText: "",
@@ -1686,8 +1731,12 @@ export class MemoryRepository {
           DELETE FROM l1_windows;
           UPDATE l0_sessions SET indexed = 0;
         `);
-        const clearLastIndexedStmt = this.db.prepare(`DELETE FROM pipeline_state WHERE state_key = ?`);
-        clearLastIndexedStmt.run("lastIndexedAt");
+        const clearStateStmt = this.db.prepare(`DELETE FROM pipeline_state WHERE state_key = ?`);
+        clearStateStmt.run(LAST_INDEXED_AT_STATE_KEY);
+        clearStateStmt.run(LAST_DREAM_AT_STATE_KEY);
+        clearStateStmt.run(LAST_DREAM_STATUS_STATE_KEY);
+        clearStateStmt.run(LAST_DREAM_SUMMARY_STATE_KEY);
+        clearStateStmt.run(LAST_DREAM_L1_ENDED_AT_STATE_KEY);
         const currentProfile = this.getGlobalProfileRecord();
         this.saveGlobalProfileRecord({
           recordId: GLOBAL_PROFILE_RECORD_ID,
@@ -1759,6 +1808,9 @@ export class MemoryRepository {
       settings: this.getIndexingSettings({
         reasoningMode: "answer_first",
         recallTopK: 10,
+        autoIndexIntervalMinutes: 60,
+        autoDreamIntervalMinutes: 360,
+        autoDreamMinNewL1: 10,
       }),
       recentTimeIndexes: this.listRecentL2Time(limit),
       recentProjectIndexes: this.listRecentL2Projects(limit),

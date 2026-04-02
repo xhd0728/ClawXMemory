@@ -11,6 +11,8 @@ export interface PluginRuntimeConfig {
   maxMessageChars: number;
   heartbeatBatchSize: number;
   autoIndexIntervalMinutes: number;
+  autoDreamIntervalMinutes: number;
+  autoDreamMinNewL1: number;
   indexIdleDebounceMs: number;
   defaultIndexingSettings: IndexingSettings;
   recallEnabled: boolean;
@@ -57,6 +59,14 @@ export const pluginConfigJsonSchema = {
     autoIndexIntervalMinutes: {
       type: "integer",
       default: 60,
+    },
+    autoDreamIntervalMinutes: {
+      type: "integer",
+      default: 360,
+    },
+    autoDreamMinNewL1: {
+      type: "integer",
+      default: 10,
     },
     reasoningMode: {
       type: "string",
@@ -129,6 +139,14 @@ export const pluginConfigUiHints = {
   autoIndexIntervalMinutes: {
     label: "Auto Index Interval",
     placeholder: "60",
+  },
+  autoDreamIntervalMinutes: {
+    label: "Auto Dream Interval",
+    placeholder: "360",
+  },
+  autoDreamMinNewL1: {
+    label: "Auto Dream L1 Threshold",
+    placeholder: "10",
   },
   reasoningMode: {
     label: "Reasoning Mode",
@@ -204,10 +222,15 @@ export function buildPluginConfig(raw: unknown): PluginRuntimeConfig {
     maxMessageChars: toInteger(cfg.maxMessageChars, 6000),
     heartbeatBatchSize: Math.max(1, toInteger(cfg.heartbeatBatchSize, 30)),
     autoIndexIntervalMinutes: Math.max(0, toInteger(cfg.autoIndexIntervalMinutes, 60)),
+    autoDreamIntervalMinutes: Math.max(0, toInteger(cfg.autoDreamIntervalMinutes, 360)),
+    autoDreamMinNewL1: Math.max(0, toInteger(cfg.autoDreamMinNewL1, 10)),
     indexIdleDebounceMs: Math.max(200, toInteger(cfg.indexIdleDebounceMs, 2500)),
     defaultIndexingSettings: {
       reasoningMode: cfg.reasoningMode === "accuracy_first" ? "accuracy_first" : "answer_first",
       recallTopK: Math.max(1, Math.min(50, Number.isFinite(configuredRecallTopK) ? configuredRecallTopK : 10)),
+      autoIndexIntervalMinutes: Math.max(0, toInteger(cfg.autoIndexIntervalMinutes, 60)),
+      autoDreamIntervalMinutes: Math.max(0, toInteger(cfg.autoDreamIntervalMinutes, 360)),
+      autoDreamMinNewL1: Math.max(0, toInteger(cfg.autoDreamMinNewL1, 10)),
     },
     recallEnabled: toBoolean(cfg.recallEnabled, true),
     addEnabled: toBoolean(cfg.addEnabled, true),

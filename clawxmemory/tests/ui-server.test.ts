@@ -10,8 +10,20 @@ async function startUiServer(controls: Record<string, unknown> = {}): Promise<st
     {} as never,
     { host: "127.0.0.1", port: 0, prefix: "/clawxmemory" },
     {
-      getSettings: () => ({ reasoningMode: "answer_first", recallTopK: 10 }),
-      saveSettings: () => ({ reasoningMode: "answer_first", recallTopK: 10 }),
+      getSettings: () => ({
+        reasoningMode: "answer_first",
+        recallTopK: 10,
+        autoIndexIntervalMinutes: 60,
+        autoDreamIntervalMinutes: 360,
+        autoDreamMinNewL1: 10,
+      }),
+      saveSettings: () => ({
+        reasoningMode: "answer_first",
+        recallTopK: 10,
+        autoIndexIntervalMinutes: 60,
+        autoDreamIntervalMinutes: 360,
+        autoDreamMinNewL1: 10,
+      }),
       runIndexNow: async () => ({ l0Captured: 0, l1Created: 0, l2TimeUpdated: 0, l2ProjectUpdated: 0, profileUpdated: 0, failed: 0 }),
       runDreamNow: async () => ({
         prepFlush: { l0Captured: 0, l1Created: 0, l2TimeUpdated: 0, l2ProjectUpdated: 0, profileUpdated: 0, failed: 0 },
@@ -85,6 +97,9 @@ describe("LocalUiServer static assets", () => {
     expect(html).toContain('id="memoryTraceBoard"');
     expect(html).toContain('data-level="memory_trace"');
     expect(html).toContain('id="dreamRunBtn"');
+    expect(html).toContain('id="autoIndexIntervalHoursInput"');
+    expect(html).toContain('id="autoDreamIntervalHoursInput"');
+    expect(html).toContain('id="autoDreamMinL1Input"');
     expect(html.indexOf('data-board="profile"')).toBeLessThan(html.indexOf('data-board="memory_trace"'));
     expect(html.indexOf('data-level="profile"')).toBeLessThan(html.indexOf('data-level="memory_trace"'));
     expect(html).not.toContain('id="retrievePanel"');
@@ -198,5 +213,62 @@ describe("LocalUiServer static assets", () => {
 
     const getResponse = await fetch(`${baseUrl}/api/dream/run`);
     expect(getResponse.status).toBe(405);
+  });
+
+  it("round-trips expanded indexing settings through /api/settings", async () => {
+    const saveSettings = vi.fn().mockImplementation((partial: Record<string, unknown>) => ({
+      reasoningMode: partial.reasoningMode ?? "accuracy_first",
+      recallTopK: partial.recallTopK ?? 12,
+      autoIndexIntervalMinutes: partial.autoIndexIntervalMinutes ?? 120,
+      autoDreamIntervalMinutes: partial.autoDreamIntervalMinutes ?? 360,
+      autoDreamMinNewL1: partial.autoDreamMinNewL1 ?? 10,
+    }));
+    const baseUrl = await startUiServer({
+      getSettings: () => ({
+        reasoningMode: "answer_first",
+        recallTopK: 10,
+        autoIndexIntervalMinutes: 60,
+        autoDreamIntervalMinutes: 360,
+        autoDreamMinNewL1: 10,
+      }),
+      saveSettings,
+    });
+
+    const getResponse = await fetch(`${baseUrl}/api/settings`);
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      reasoningMode: "answer_first",
+      recallTopK: 10,
+      autoIndexIntervalMinutes: 60,
+      autoDreamIntervalMinutes: 360,
+      autoDreamMinNewL1: 10,
+    });
+
+    const postResponse = await fetch(`${baseUrl}/api/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        reasoningMode: "accuracy_first",
+        recallTopK: 12,
+        autoIndexIntervalMinutes: 120,
+        autoDreamIntervalMinutes: 180,
+        autoDreamMinNewL1: 15,
+      }),
+    });
+    expect(postResponse.status).toBe(200);
+    await expect(postResponse.json()).resolves.toMatchObject({
+      reasoningMode: "accuracy_first",
+      recallTopK: 12,
+      autoIndexIntervalMinutes: 120,
+      autoDreamIntervalMinutes: 180,
+      autoDreamMinNewL1: 15,
+    });
+    expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+      reasoningMode: "accuracy_first",
+      recallTopK: 12,
+      autoIndexIntervalMinutes: 120,
+      autoDreamIntervalMinutes: 180,
+      autoDreamMinNewL1: 15,
+    }));
   });
 });

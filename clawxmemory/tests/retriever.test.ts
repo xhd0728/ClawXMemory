@@ -9,6 +9,17 @@ import type {
 } from "../src/core/index.js";
 import { ReasoningRetriever } from "../src/core/index.js";
 
+function createSettings(overrides: Record<string, unknown> = {}) {
+  return {
+    reasoningMode: "accuracy_first",
+    recallTopK: 10,
+    autoIndexIntervalMinutes: 60,
+    autoDreamIntervalMinutes: 360,
+    autoDreamMinNewL1: 10,
+    ...overrides,
+  };
+}
+
 function createSkillsRuntime() {
   return {
     intentRules: { timeKeywords: [], projectKeywords: [], factKeywords: [] },
@@ -180,7 +191,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("hello", { retrievalMode: "explicit" });
@@ -210,7 +221,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("介绍一下我", { retrievalMode: "explicit" });
@@ -252,7 +263,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("不够详细", {
@@ -297,7 +308,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("我今天都在忙什么", { retrievalMode: "explicit" });
@@ -332,7 +343,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("ClawXMemory 项目进展", { retrievalMode: "explicit" });
@@ -367,7 +378,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 4 }) },
+      { getSettings: () => createSettings({ recallTopK: 4 }) },
     );
 
     const result = await retriever.retrieve("我今天这个项目进展如何", { retrievalMode: "explicit", l2Limit: 4 });
@@ -432,7 +443,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 2 }) },
+      { getSettings: () => createSettings({ recallTopK: 2 }) },
     );
 
     const result = await retriever.retrieve("最近一周 ClawXMemory 进展", { retrievalMode: "auto" });
@@ -498,7 +509,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("我今天都在忙什么", { retrievalMode: "auto" });
@@ -533,7 +544,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("我今天都在忙什么", { retrievalMode: "auto" });
@@ -572,7 +583,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings() },
     );
 
     const result = await retriever.retrieve("我今天都在忙什么", { retrievalMode: "auto" });
@@ -604,7 +615,7 @@ describe("ReasoningRetriever", () => {
       repository as never,
       createSkillsRuntime() as never,
       extractor as never,
-      { getSettings: () => ({ reasoningMode: "answer_first", recallTopK: 10 }) },
+      { getSettings: () => createSettings({ reasoningMode: "answer_first" }) },
     );
 
     const result = await retriever.retrieve("我今天都在忙什么", { retrievalMode: "auto" });

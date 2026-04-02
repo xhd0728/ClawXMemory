@@ -531,6 +531,9 @@ export class ReasoningRetriever {
     return this.runtime.getSettings?.() ?? {
       reasoningMode: "answer_first",
       recallTopK: DEFAULT_RECALL_TOP_K,
+      autoIndexIntervalMinutes: 60,
+      autoDreamIntervalMinutes: 360,
+      autoDreamMinNewL1: 10,
     };
   }
 

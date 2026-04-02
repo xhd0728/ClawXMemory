@@ -115,6 +115,9 @@ export interface DreamRewriteOutcome {
 
 export interface DreamRunResult extends DreamRewriteOutcome {
   prepFlush: HeartbeatStats;
+  trigger?: "manual" | "scheduled";
+  status?: "success" | "skipped";
+  skipReason?: string;
 }
 
 const DREAM_RECENT_L1_LIMIT = 12;

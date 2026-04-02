@@ -20,6 +20,7 @@ describe("MemoryPluginRuntime", () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     for (const runtime of runtimes.splice(0)) {
       runtime.stop();
     }
@@ -1325,5 +1326,275 @@ describe("MemoryPluginRuntime", () => {
     await queuedIndexPromise;
     await dreamPromise;
     expect(drainSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("schedules auto index and auto Dream timers and rebuilds them after settings changes", async () => {
+    vi.useFakeTimers();
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+        autoIndexIntervalMinutes: 60,
+        autoDreamIntervalMinutes: 360,
+        autoDreamMinNewL1: 10,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    vi.spyOn(runtime as never as {
+      runStartupInitialization: () => Promise<void>;
+    }, "runStartupInitialization").mockResolvedValue(undefined);
+    const indexSpy = vi.spyOn(runtime as never as {
+      requestIndexRun: (reason: string, sessionKeys?: string[]) => Promise<unknown>;
+    }, "requestIndexRun").mockResolvedValue({
+      l0Captured: 0,
+      l1Created: 0,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    });
+    const dreamSpy = vi.spyOn(runtime as never as {
+      runDreamNow: (trigger: "manual" | "scheduled") => Promise<unknown>;
+    }, "runDreamNow").mockResolvedValue({
+      prepFlush: { l0Captured: 0, l1Created: 0, l2TimeUpdated: 0, l2ProjectUpdated: 0, profileUpdated: 0, failed: 0 },
+      reviewedL1: 0,
+      rewrittenProjects: 0,
+      deletedProjects: 0,
+      profileUpdated: false,
+      duplicateTopicCount: 0,
+      conflictTopicCount: 0,
+      prunedProjectL1Refs: 0,
+      prunedProfileL1Refs: 0,
+      summary: "noop",
+      status: "skipped",
+      trigger: "scheduled",
+      skipReason: "new_l1_below_threshold",
+    });
+
+    runtime.start();
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(indexSpy).toHaveBeenCalledWith("scheduled");
+    expect(dreamSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 60 * 1000);
+    expect(dreamSpy).toHaveBeenCalledWith("scheduled");
+
+    indexSpy.mockClear();
+    dreamSpy.mockClear();
+
+    (runtime as never as {
+      applyIndexingSettings: (partial: Record<string, unknown>) => unknown;
+    }).applyIndexingSettings({
+      autoIndexIntervalMinutes: 120,
+      autoDreamIntervalMinutes: 60,
+    });
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(indexSpy).not.toHaveBeenCalled();
+    expect(dreamSpy).toHaveBeenCalledWith("scheduled");
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    expect(indexSpy).toHaveBeenCalledWith("scheduled");
+  });
+
+  it("skips scheduled Dream when new L1 count is below the configured threshold", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const prepFlush = {
+      l0Captured: 0,
+      l1Created: 0,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    };
+    vi.spyOn(runtime as never as {
+      flushAllNow: (reason: string, options?: { allowWhileDream?: boolean }) => Promise<typeof prepFlush>;
+    }, "flushAllNow").mockResolvedValue(prepFlush);
+    const dreamSpy = vi.spyOn((runtime as never as {
+      dreamRewriter: { run: () => Promise<unknown> };
+    }).dreamRewriter, "run").mockResolvedValue({
+      reviewedL1: 1,
+      rewrittenProjects: 1,
+      deletedProjects: 0,
+      profileUpdated: true,
+      duplicateTopicCount: 0,
+      conflictTopicCount: 0,
+      prunedProjectL1Refs: 0,
+      prunedProfileL1Refs: 0,
+      summary: "should not run",
+    });
+
+    const result = await (runtime as never as {
+      runDreamNow: (trigger: "scheduled") => Promise<Record<string, unknown>>;
+    }).runDreamNow("scheduled");
+
+    expect(dreamSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      status: "skipped",
+      skipReason: "new_l1_below_threshold",
+      prepFlush,
+    });
+    expect(runtime.repository.getPipelineState("lastDreamStatus")).toBe("skipped");
+  });
+
+  it("runs scheduled Dream after 10 new L1 windows and records the latest successful cutoff", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    for (let index = 0; index < 10; index += 1) {
+      const minutes = String(index).padStart(2, "0");
+      runtime.repository.insertL1Window({
+        l1IndexId: `l1-${index}`,
+        sessionKey: `session-${index}`,
+        timePeriod: `2026-04-01 ${minutes}:00`,
+        startedAt: `2026-04-01T00:${minutes}:00.000Z`,
+        endedAt: `2026-04-01T00:${minutes}:30.000Z`,
+        summary: `summary-${index}`,
+        facts: [],
+        situationTimeInfo: "",
+        projectTags: [],
+        projectDetails: [],
+        l0Source: [],
+        createdAt: `2026-04-01T00:${minutes}:30.000Z`,
+      });
+    }
+
+    const prepFlush = {
+      l0Captured: 0,
+      l1Created: 0,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    };
+    vi.spyOn(runtime as never as {
+      flushAllNow: (reason: string, options?: { allowWhileDream?: boolean }) => Promise<typeof prepFlush>;
+    }, "flushAllNow").mockResolvedValue(prepFlush);
+    const dreamSpy = vi.spyOn((runtime as never as {
+      dreamRewriter: { run: () => Promise<unknown> };
+    }).dreamRewriter, "run").mockResolvedValue({
+      reviewedL1: 10,
+      rewrittenProjects: 2,
+      deletedProjects: 1,
+      profileUpdated: true,
+      duplicateTopicCount: 1,
+      conflictTopicCount: 0,
+      prunedProjectL1Refs: 3,
+      prunedProfileL1Refs: 1,
+      summary: "scheduled ok",
+    });
+
+    const result = await (runtime as never as {
+      runDreamNow: (trigger: "scheduled") => Promise<Record<string, unknown>>;
+    }).runDreamNow("scheduled");
+
+    expect(dreamSpy).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      status: "success",
+      trigger: "scheduled",
+      reviewedL1: 10,
+      rewrittenProjects: 2,
+    });
+    expect(runtime.repository.getPipelineState("lastDreamStatus")).toBe("success");
+    expect(runtime.repository.getPipelineState("lastDreamL1EndedAt")).toBe("2026-04-01T00:09:30.000Z");
+  });
+
+  it("does not apply the auto Dream threshold to manual Dream runs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    runtime.repository.insertL1Window({
+      l1IndexId: "l1-only",
+      sessionKey: "session-only",
+      timePeriod: "2026-04-01",
+      startedAt: "2026-04-01T00:00:00.000Z",
+      endedAt: "2026-04-01T00:05:00.000Z",
+      summary: "single l1",
+      facts: [],
+      situationTimeInfo: "",
+      projectTags: [],
+      projectDetails: [],
+      l0Source: [],
+      createdAt: "2026-04-01T00:05:00.000Z",
+    });
+
+    const prepFlush = {
+      l0Captured: 0,
+      l1Created: 0,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    };
+    vi.spyOn(runtime as never as {
+      flushAllNow: (reason: string, options?: { allowWhileDream?: boolean }) => Promise<typeof prepFlush>;
+    }, "flushAllNow").mockResolvedValue(prepFlush);
+    const dreamSpy = vi.spyOn((runtime as never as {
+      dreamRewriter: { run: () => Promise<unknown> };
+    }).dreamRewriter, "run").mockResolvedValue({
+      reviewedL1: 1,
+      rewrittenProjects: 1,
+      deletedProjects: 0,
+      profileUpdated: true,
+      duplicateTopicCount: 0,
+      conflictTopicCount: 0,
+      prunedProjectL1Refs: 0,
+      prunedProfileL1Refs: 0,
+      summary: "manual ok",
+    });
+
+    const result = await (runtime as never as {
+      runDreamNow: (trigger: "manual") => Promise<Record<string, unknown>>;
+    }).runDreamNow("manual");
+
+    expect(dreamSpy).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      status: "success",
+      trigger: "manual",
+      reviewedL1: 1,
+    });
   });
 });

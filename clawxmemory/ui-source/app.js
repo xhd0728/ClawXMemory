@@ -35,6 +35,12 @@ const LOCALES = {
     "settings.mode.answer_first": "效率优先",
     "settings.mode.accuracy_first": "准确优先",
     "settings.maxLatency": "召回数量",
+    "settings.autoIndexInterval": "自动索引间隔（小时）",
+    "settings.autoDreamInterval": "自动 Dream 间隔（小时）",
+    "settings.autoDreamMinL1": "自动 Dream 最小新增 L1",
+    "settings.scheduleHint": "0 表示关闭自动任务",
+    "settings.autoDreamHint": "只有新增 L1 达到门槛时，自动 Dream 才会真正执行。",
+    "settings.off": "已关闭",
     "settings.save": "保存设置",
     "settings.theme": "主题",
     "settings.theme.light": "浅色",
@@ -152,6 +158,10 @@ const LOCALES = {
     "overview.recallMs": "最近召回",
     "overview.recallMode": "召回模式",
     "overview.reasoningMode": "推理模式",
+    "overview.autoIndexSchedule": "自动索引",
+    "overview.autoDreamSchedule": "自动 Dream",
+    "overview.lastDreamAt": "最近 Dream",
+    "overview.lastDreamStatus": "Dream 状态",
     "overview.recallPath": "回答路径",
     "overview.budgetStop": "预算截停",
     "overview.shadowDeep": "后台备案",
@@ -167,6 +177,11 @@ const LOCALES = {
     "overview.group.reasoning": "推理与预算",
     "overview.group.health": "系统健康",
     "overview.pending": "待索引",
+    "dream.status.never": "尚未运行",
+    "dream.status.running": "运行中",
+    "dream.status.success": "成功",
+    "dream.status.skipped": "已跳过",
+    "dream.status.failed": "失败",
     "recall.llm": "LLM 快选",
     "recall.local_fallback": "本地降级",
     "recall.none": "无注入",
@@ -298,6 +313,12 @@ const LOCALES = {
     "settings.mode.answer_first": "Speed first",
     "settings.mode.accuracy_first": "Accuracy first",
     "settings.maxLatency": "Recall Top K",
+    "settings.autoIndexInterval": "Auto index interval (hours)",
+    "settings.autoDreamInterval": "Auto Dream interval (hours)",
+    "settings.autoDreamMinL1": "Auto Dream min new L1",
+    "settings.scheduleHint": "0 disables the automatic job",
+    "settings.autoDreamHint": "Automatic Dream only runs when new L1 windows reach the configured threshold.",
+    "settings.off": "Off",
     "settings.save": "Save",
     "settings.theme": "Theme",
     "settings.theme.light": "Light",
@@ -415,6 +436,10 @@ const LOCALES = {
     "overview.recallMs": "Last Recall",
     "overview.recallMode": "Recall Mode",
     "overview.reasoningMode": "Reasoning Mode",
+    "overview.autoIndexSchedule": "Auto Index",
+    "overview.autoDreamSchedule": "Auto Dream",
+    "overview.lastDreamAt": "Last Dream",
+    "overview.lastDreamStatus": "Dream Status",
     "overview.recallPath": "Reply Path",
     "overview.budgetStop": "Budget Stop",
     "overview.shadowDeep": "Shadow Deep",
@@ -430,6 +455,11 @@ const LOCALES = {
     "overview.group.reasoning": "Reasoning & Budget",
     "overview.group.health": "System Health",
     "overview.pending": "Pending",
+    "dream.status.never": "Never run",
+    "dream.status.running": "Running",
+    "dream.status.success": "Success",
+    "dream.status.skipped": "Skipped",
+    "dream.status.failed": "Failed",
     "recall.llm": "LLM Fast Path",
     "recall.local_fallback": "Local Fallback",
     "recall.none": "No Memory",
@@ -655,6 +685,9 @@ const clearMemoryBtn = $("#clearMemoryBtn");
 const importMemoryInput = $("#importMemoryInput");
 const reasoningModeToggle = document.getElementById("reasoningModeToggle");
 const maxAutoReplyLatencyInput = $("#maxAutoReplyLatencyInput");
+const autoIndexIntervalHoursInput = $("#autoIndexIntervalHoursInput");
+const autoDreamIntervalHoursInput = $("#autoDreamIntervalHoursInput");
+const autoDreamMinL1Input = $("#autoDreamMinL1Input");
 const latencyFieldWrap = $("#latencyFieldWrap");
 const langToggle = document.getElementById("langToggle");
 
@@ -725,6 +758,9 @@ const state = {
   settings: {
     reasoningMode: "answer_first",
     recallTopK: 10,
+    autoIndexIntervalMinutes: 60,
+    autoDreamIntervalMinutes: 360,
+    autoDreamMinNewL1: 10,
   },
   globalProfile: { recordId: "global_profile_record", profileText: "", sourceL1Ids: [], createdAt: "", updatedAt: "" },
   baseRaw: { l2_time: [], l2_project: [], l1: [], l0: [], profile: [] },
@@ -983,6 +1019,11 @@ function renderOverview(overview = {}) {
   const lastRecallCacheHit = Boolean(overview.lastRecallCacheHit);
   const lastRecallPath = overview.lastRecallPath || "explicit";
   const currentReasoningMode = overview.currentReasoningMode || state.settings.reasoningMode || "answer_first";
+  const autoIndexSchedule = formatScheduleHours(state.settings.autoIndexIntervalMinutes);
+  const autoDreamSchedule = formatScheduleHours(state.settings.autoDreamIntervalMinutes);
+  const lastDreamAt = overview.lastDreamAt ? formatTime(overview.lastDreamAt) : t("nav.waiting");
+  const lastDreamStatus = t(`dream.status.${overview.lastDreamStatus || "never"}`);
+  const lastDreamSummary = String(overview.lastDreamSummary || "").trim();
   const lastRecallBudgetLimited = Boolean(overview.lastRecallBudgetLimited);
   const lastShadowDeepQueued = Boolean(overview.lastShadowDeepQueued);
   const primaryConflict = formatConflictSummary(runtimeIssues[0]);
@@ -1035,6 +1076,15 @@ function renderOverview(overview = {}) {
   reasonGrid.append(
     createMetricCell(t("overview.reasoningMode"), t(`reasoning.${currentReasoningMode}`), "default"),
     createMetricCell(t("overview.queued"), overview.queuedSessions ?? 0, "default"),
+    createMetricCell(t("overview.autoIndexSchedule"), autoIndexSchedule, "default"),
+    createMetricCell(
+      t("overview.autoDreamSchedule"),
+      autoDreamSchedule,
+      "default",
+      `L1 >= ${state.settings.autoDreamMinNewL1 ?? 10}`,
+    ),
+    createMetricCell(t("overview.lastDreamAt"), lastDreamAt, "default"),
+    createMetricCell(t("overview.lastDreamStatus"), lastDreamStatus, "default", lastDreamSummary),
     createMetricCell(
       t("overview.budgetStop"),
       lastRecallBudgetLimited ? t("boundary.budgetStopped") : t("boundary.budgetNotStopped"),
@@ -1089,10 +1139,33 @@ function renderOverview(overview = {}) {
 
 /* ── Settings ────────────────────────────────────────────── */
 
+function minutesToHoursValue(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(fallback);
+  return String(Math.max(0, Math.round(numeric / 60)));
+}
+
+function parseHoursToMinutes(value, fallbackMinutes) {
+  const parsed = Number.parseFloat(String(value || "").trim());
+  if (!Number.isFinite(parsed)) return fallbackMinutes;
+  return Math.max(0, Math.round(parsed * 60));
+}
+
+function formatScheduleHours(minutes) {
+  const numeric = Number(minutes);
+  if (!Number.isFinite(numeric) || numeric <= 0) return t("settings.off");
+  const hours = numeric / 60;
+  const rendered = Number.isInteger(hours) ? String(hours) : hours.toFixed(1).replace(/\.0$/, "");
+  return `${rendered}h`;
+}
+
 function applySettings(settings = {}) {
   state.settings = {
     reasoningMode: "answer_first",
     recallTopK: 10,
+    autoIndexIntervalMinutes: 60,
+    autoDreamIntervalMinutes: 360,
+    autoDreamMinNewL1: 10,
     ...(settings || {}),
   };
   const activeMode = state.settings.reasoningMode || "answer_first";
@@ -1102,11 +1175,21 @@ function applySettings(settings = {}) {
     });
   }
   maxAutoReplyLatencyInput.value = String(state.settings.recallTopK ?? 10);
+  if (autoIndexIntervalHoursInput) {
+    autoIndexIntervalHoursInput.value = minutesToHoursValue(state.settings.autoIndexIntervalMinutes, 1);
+  }
+  if (autoDreamIntervalHoursInput) {
+    autoDreamIntervalHoursInput.value = minutesToHoursValue(state.settings.autoDreamIntervalMinutes, 6);
+  }
+  if (autoDreamMinL1Input) {
+    autoDreamMinL1Input.value = String(Math.max(0, Number(state.settings.autoDreamMinNewL1 ?? 10)));
+  }
   updateSettingsVisibility();
 }
 
 function readSettingsForm() {
   const parsedRecallTopK = Number.parseInt(String(maxAutoReplyLatencyInput.value || "").trim(), 10);
+  const parsedDreamMinL1 = Number.parseInt(String(autoDreamMinL1Input?.value || "").trim(), 10);
   const activeBtn = reasoningModeToggle?.querySelector(".popover-seg-btn.active");
   const reasoningMode = activeBtn?.dataset.mode === "accuracy_first" ? "accuracy_first" : "answer_first";
   return {
@@ -1114,6 +1197,11 @@ function readSettingsForm() {
     recallTopK: Number.isFinite(parsedRecallTopK)
       ? Math.max(1, Math.min(50, parsedRecallTopK))
       : state.settings.recallTopK,
+    autoIndexIntervalMinutes: parseHoursToMinutes(autoIndexIntervalHoursInput?.value, state.settings.autoIndexIntervalMinutes ?? 60),
+    autoDreamIntervalMinutes: parseHoursToMinutes(autoDreamIntervalHoursInput?.value, state.settings.autoDreamIntervalMinutes ?? 360),
+    autoDreamMinNewL1: Number.isFinite(parsedDreamMinL1)
+      ? Math.max(0, parsedDreamMinL1)
+      : state.settings.autoDreamMinNewL1,
   };
 }
 
@@ -2273,8 +2361,8 @@ function syncBaseItems() {
 
 async function loadSnapshot() {
   const snap = await fetchJson("./api/snapshot?limit=24");
-  renderOverview(snap.overview || {});
   applySettings(snap.settings || {});
+  renderOverview(snap.overview || {});
   state.globalProfile = snap.globalProfile || state.globalProfile;
   state.baseRaw.l2_time = snap.recentTimeIndexes || [];
   state.baseRaw.l2_project = snap.recentProjectIndexes || [];
@@ -2923,7 +3011,7 @@ async function saveSettings() {
   const settings = await postJson("./api/settings", payload);
   applySettings(settings);
   const modeLabel = t(`reasoning.${settings.reasoningMode || "answer_first"}`);
-  const summary = `${modeLabel} · topK=${settings.recallTopK ?? 10}`;
+  const summary = `${modeLabel} · topK=${settings.recallTopK ?? 10} · index=${formatScheduleHours(settings.autoIndexIntervalMinutes)} · dream=${formatScheduleHours(settings.autoDreamIntervalMinutes)} / L1>=${settings.autoDreamMinNewL1 ?? 10}`;
   setActivity("status.settingsSaved", "success", summary);
 }
 

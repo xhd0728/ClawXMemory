@@ -24,10 +24,14 @@ export interface FactCandidate {
 
 export type ProjectStatus = "planned" | "in_progress" | "done";
 export type ReasoningMode = "answer_first" | "accuracy_first";
+export type DreamPipelineStatus = "running" | "success" | "skipped" | "failed";
 
 export interface IndexingSettings {
   reasoningMode: ReasoningMode;
   recallTopK: number;
+  autoIndexIntervalMinutes: number;
+  autoDreamIntervalMinutes: number;
+  autoDreamMinNewL1: number;
 }
 
 export interface ActiveTopicBufferRecord {
@@ -331,6 +335,10 @@ export interface DashboardOverview {
   memoryRuntimeHealthy?: boolean;
   runtimeIssues?: string[];
   lastIndexedAt?: string;
+  lastDreamAt?: string;
+  lastDreamStatus?: DreamPipelineStatus;
+  lastDreamSummary?: string;
+  lastDreamL1EndedAt?: string;
   startupRepairStatus?: StartupRepairStatus;
   startupRepairMessage?: string;
 }
