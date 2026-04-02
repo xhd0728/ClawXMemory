@@ -2,11 +2,13 @@ import {
   type CaseToolEvent,
   type CaseTraceRecord,
   type DashboardOverview,
+  DreamRewriteRunner,
   HeartbeatIndexer,
   LlmMemoryExtractor,
   MemoryRepository,
   ReasoningRetriever,
   loadSkillsRuntime,
+  type DreamRunResult,
   type HeartbeatStats,
   type IndexingSettings,
   type MemoryMessage,
@@ -533,6 +535,7 @@ export class MemoryPluginRuntime {
   readonly repository: MemoryRepository;
   readonly indexer: HeartbeatIndexer;
   readonly retriever: ReasoningRetriever;
+  readonly dreamRewriter: DreamRewriteRunner;
 
   private readonly pluginRuntime: PluginRuntime | undefined;
   private currentApiConfig: Record<string, unknown> | undefined;
@@ -562,6 +565,8 @@ export class MemoryPluginRuntime {
   private startupRepairStatus: StartupRepairStatus = "idle";
   private startupRepairMessage = "";
   private startupRepairSnapshot: MemoryUiSnapshot | undefined;
+  private dreamRunPromise: Promise<DreamRunResult> | undefined;
+  private dreamRunLocked = false;
 
   constructor(options: MemoryPluginRuntimeOptions) {
     this.logger = safeLog(options.logger);
@@ -599,6 +604,7 @@ export class MemoryPluginRuntime {
         isBackgroundBusy: () => this.indexingInProgress,
       },
     );
+    this.dreamRewriter = new DreamRewriteRunner(this.repository, extractor, { logger: this.logger });
 
     if (this.config.uiEnabled) {
       this.uiServer = new LocalUiServer(
@@ -613,6 +619,7 @@ export class MemoryPluginRuntime {
           getSettings: () => this.indexer.getSettings(),
           saveSettings: (partial) => this.applyIndexingSettings(partial),
           runIndexNow: () => this.flushAllNow("manual"),
+          runDreamNow: () => this.runDreamNow("manual"),
           exportMemoryBundle: () => this.repository.exportMemoryBundle(),
           importMemoryBundle: (bundle) => this.replaceMemoryBundle(bundle),
           getRuntimeOverview: () => this.getRuntimeOverview(),
@@ -1429,15 +1436,25 @@ export class MemoryPluginRuntime {
     return aggregate;
   }
 
-  private requestIndexRun(reason: string, sessionKeys?: string[]): Promise<HeartbeatStats> {
+  private requestIndexRun(
+    reason: string,
+    sessionKeys?: string[],
+    options?: { allowWhileDream?: boolean },
+  ): Promise<HeartbeatStats> {
     if (sessionKeys && sessionKeys.length > 0) {
       sessionKeys.filter(Boolean).forEach((sessionKey) => this.queuedSessionKeys.add(sessionKey));
     } else {
       this.queuedFullRun = true;
     }
     this.queuedReason = this.queuedReason ? `${this.queuedReason}+${reason}` : reason;
-    if (!this.queuePromise) {
+    if (!this.queuePromise && (!this.dreamRunLocked || options?.allowWhileDream)) {
       this.queuePromise = this.drainIndexQueue();
+    }
+    if (!this.queuePromise) {
+      return (async () => {
+        await this.dreamRunPromise;
+        return this.queuePromise ? await this.queuePromise : emptyStats();
+      })();
     }
     return this.queuePromise;
   }
@@ -1491,11 +1508,42 @@ export class MemoryPluginRuntime {
     return this.requestIndexRun(reason, [sessionKey]);
   }
 
-  private flushAllNow(reason: string): Promise<HeartbeatStats> {
+  private flushAllNow(reason: string, options?: { allowWhileDream?: boolean }): Promise<HeartbeatStats> {
     for (const sessionKey of Array.from(this.debouncedSessions)) {
       this.clearIdleTimer(sessionKey);
     }
-    return this.requestIndexRun(reason);
+    return this.requestIndexRun(reason, undefined, options);
+  }
+
+  private async runDreamNow(trigger: "manual"): Promise<DreamRunResult> {
+    if (this.dreamRunLocked || this.dreamRunPromise) {
+      throw new Error("Dream reconstruction is already running");
+    }
+
+    this.dreamRunLocked = true;
+    const promise = (async () => {
+      if (this.queuePromise) {
+        await this.queuePromise;
+      }
+      const prepFlush = await this.flushAllNow("dream_prep", { allowWhileDream: true });
+      const outcome = await this.dreamRewriter.run();
+      this.logger.info?.(
+        `[clawxmemory] dream run(${trigger}) reviewed_l1=${outcome.reviewedL1} rewritten_projects=${outcome.rewrittenProjects} deleted_projects=${outcome.deletedProjects} profile_updated=${outcome.profileUpdated}`,
+      );
+      return {
+        prepFlush,
+        ...outcome,
+      };
+    })().finally(() => {
+      this.dreamRunPromise = undefined;
+      this.dreamRunLocked = false;
+      if ((this.queuedFullRun || this.queuedSessionKeys.size > 0) && !this.queuePromise) {
+        this.queuePromise = this.drainIndexQueue();
+      }
+    });
+
+    this.dreamRunPromise = promise;
+    return promise;
   }
 
   private startBackgroundRepair(): void {

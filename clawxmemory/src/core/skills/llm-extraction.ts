@@ -1,4 +1,8 @@
 import type {
+  DreamEvidenceRef,
+  DreamReviewFinding,
+  DreamReviewFocus,
+  DreamReviewResult,
   FactCandidate,
   GlobalProfileRecord,
   IntentType,
@@ -86,6 +90,54 @@ interface RawProfilePayload {
   profile_text?: unknown;
 }
 
+interface RawDreamFindingPayload {
+  title?: unknown;
+  rationale?: unknown;
+  confidence?: unknown;
+  target?: unknown;
+  evidence_refs?: unknown;
+}
+
+interface RawDreamReviewPayload {
+  summary?: unknown;
+  project_rebuild?: unknown;
+  profile_suggestions?: unknown;
+  cleanup?: unknown;
+  ambiguous?: unknown;
+  no_action?: unknown;
+}
+
+interface RawDreamProjectPlanItemPayload {
+  project_key?: unknown;
+  project_name?: unknown;
+  current_status?: unknown;
+  summary?: unknown;
+  latest_progress?: unknown;
+  retained_l1_ids?: unknown;
+}
+
+interface RawDreamL1IssuePayload {
+  issue_type?: unknown;
+  title?: unknown;
+  l1_ids?: unknown;
+  related_project_keys?: unknown;
+}
+
+interface RawDreamProjectPlanPayload {
+  summary?: unknown;
+  duplicate_topic_count?: unknown;
+  conflict_topic_count?: unknown;
+  projects?: unknown;
+  deleted_project_keys?: unknown;
+  l1_issues?: unknown;
+}
+
+interface RawDreamGlobalProfileRewritePayload {
+  profile_text?: unknown;
+  source_l1_ids?: unknown;
+  conflict_with_existing?: unknown;
+}
+
 interface RawReasoningPayload {
   intent?: unknown;
   enough_at?: unknown;
@@ -166,6 +218,91 @@ export interface LlmGlobalProfileInput {
   existingProfile: string;
   l1: L1WindowRecord;
   agentId?: string;
+}
+
+export interface LlmDreamReviewInput {
+  focus: DreamReviewFocus;
+  profile: GlobalProfileRecord | null;
+  l2Projects: L2ProjectIndexRecord[];
+  l1Windows: L1WindowRecord[];
+  l0Sessions: L0SessionRecord[];
+  evidenceRefs: DreamEvidenceRef[];
+  timeLayerNotes: DreamReviewFinding[];
+  agentId?: string;
+}
+
+export type LlmDreamReviewResult = Omit<DreamReviewResult, "timeLayerNotes" | "evidenceRefs">;
+
+export interface LlmDreamProjectClusterInput {
+  clusterId: string;
+  label: string;
+  candidateKeys: string[];
+  candidateNames: string[];
+  currentProjectKeys: string[];
+  l1Ids: string[];
+  statuses: ProjectStatus[];
+  summaries: string[];
+  latestProgresses: string[];
+  issueHints: Array<"duplicate" | "conflict" | "isolated">;
+  representativeWindows: Array<{
+    l1IndexId: string;
+    endedAt: string;
+    summary: string;
+  }>;
+}
+
+export interface LlmDreamProjectRebuildInput {
+  currentProjects: L2ProjectIndexRecord[];
+  profile: GlobalProfileRecord | null;
+  l1Windows: L1WindowRecord[];
+  l0Sessions: L0SessionRecord[];
+  clusters: LlmDreamProjectClusterInput[];
+  agentId?: string;
+}
+
+export interface LlmDreamL1Issue {
+  issueType: "duplicate" | "conflict" | "isolated";
+  title: string;
+  l1Ids: string[];
+  relatedProjectKeys: string[];
+}
+
+export interface LlmDreamProjectRebuildOutput {
+  summary: string;
+  duplicateTopicCount: number;
+  conflictTopicCount: number;
+  projects: Array<{
+    projectKey: string;
+    projectName: string;
+    currentStatus: ProjectStatus;
+    summary: string;
+    latestProgress: string;
+    retainedL1Ids: string[];
+  }>;
+  deletedProjectKeys: string[];
+  l1Issues: LlmDreamL1Issue[];
+}
+
+export interface LlmDreamGlobalProfileRewriteInput {
+  existingProfile: GlobalProfileRecord | null;
+  l1Windows: L1WindowRecord[];
+  currentProjects: L2ProjectIndexRecord[];
+  plannedProjects: Array<{
+    projectKey: string;
+    projectName: string;
+    currentStatus: ProjectStatus;
+    summary: string;
+    latestProgress: string;
+    retainedL1Ids: string[];
+  }>;
+  l1Issues: LlmDreamL1Issue[];
+  agentId?: string;
+}
+
+export interface LlmDreamGlobalProfileRewriteOutput {
+  profileText: string;
+  sourceL1Ids: string[];
+  conflictWithExisting: boolean;
 }
 
 export interface LlmReasoningInput {
@@ -505,6 +642,145 @@ Rules:
 Use this exact JSON shape:
 {
   "profile_text": "updated stable user profile paragraph"
+}
+`.trim();
+
+const DREAM_REVIEW_SYSTEM_PROMPT = `
+You are a read-only Dream review engine for a layered conversational memory system.
+
+Your job is to review recent memory quality and emit governance findings without modifying memory.
+
+Rules:
+- Treat recent L1 windows as the primary source of truth.
+- Review whether current L2 project memories still match the recent L1 evidence.
+- Review whether stable cross-window signals should be promoted into the global profile, or whether existing profile content now conflicts with recent evidence.
+- L2Time is a diary-like time layer. Do not treat it as a semantic rewrite target. Use time-layer integrity notes only as context.
+- Use L0 previews only when they help explain why an L1 window may be suspicious or ambiguous.
+- Only output findings supported by the provided evidence_refs.
+- Each finding must cite only ref ids that appear in the provided evidence set.
+- Keep findings concise, concrete, and implementer-friendly.
+- If a finding is mainly about rebuilding or merging project memories, use target="l2_project".
+- If a finding is mainly about stable profile promotion or profile conflict, use target="global_profile".
+- If a finding is about L1 extraction/grouping quality and should not directly rewrite higher layers yet, use target="l1_only".
+- Natural-language output should follow the dominant language already used in the supplied evidence.
+- Return valid JSON only.
+
+Use this exact JSON shape:
+{
+  "summary": "short review summary",
+  "project_rebuild": [
+    {
+      "title": "short finding title",
+      "rationale": "why this should be reviewed or rebuilt",
+      "confidence": 0.0,
+      "target": "l2_project | global_profile | l1_only",
+      "evidence_refs": ["ref:id"]
+    }
+  ],
+  "profile_suggestions": [
+    {
+      "title": "short finding title",
+      "rationale": "why this stable signal should be promoted or why profile conflicts",
+      "confidence": 0.0,
+      "target": "global_profile | l1_only",
+      "evidence_refs": ["ref:id"]
+    }
+  ],
+  "cleanup": [
+    {
+      "title": "short finding title",
+      "rationale": "duplicate, stale, or noisy memory issue",
+      "confidence": 0.0,
+      "target": "l2_project | global_profile | l1_only",
+      "evidence_refs": ["ref:id"]
+    }
+  ],
+  "ambiguous": [
+    {
+      "title": "short finding title",
+      "rationale": "what remains ambiguous and why more verification is needed",
+      "confidence": 0.0,
+      "target": "l1_only | l2_project | global_profile",
+      "evidence_refs": ["ref:id"]
+    }
+  ],
+  "no_action": [
+    {
+      "title": "short finding title",
+      "rationale": "why this memory looks healthy and should remain as-is",
+      "confidence": 0.0,
+      "target": "l2_project | global_profile | l1_only",
+      "evidence_refs": ["ref:id"]
+    }
+  ]
+}
+`.trim();
+
+const DREAM_PROJECT_REBUILD_SYSTEM_PROMPT = `
+You are the Dream project reconstruction planner for a layered conversational memory system.
+
+Your job is to inspect all supplied L1 windows, current L2 project memories, and local topic clusters, then output the final L2 project set that should be written back.
+
+Rules:
+- L1 windows are the primary evidence source.
+- Rebuild project memories from L1. Do not preserve an old L2 project just because it already exists.
+- Merge duplicate or overlapping projects when they clearly describe the same ongoing effort.
+- If a current L2 project is stale, duplicated, or no longer supported by the supplied L1 evidence, include its key in deleted_project_keys.
+- Do not modify, delete, or rewrite L1. Only decide how L1 should map into rebuilt L2 projects.
+- Prefer one main project owner for each L1 window. Reuse the same L1 in multiple rebuilt projects only when the overlap is genuinely necessary.
+- Each rebuilt project must provide a stable project_key, human-recognizable project_name, current_status, rolling summary, latest_progress, and the retained_l1_ids that justify it.
+- retained_l1_ids must only contain ids that appear in the supplied l1_windows.
+- Use l1_issues only for duplicate/conflict/isolated L1 topic notes that help explain the rebuild.
+- Natural-language output should follow the dominant language already present in the supplied evidence.
+- Return valid JSON only.
+
+Use this exact JSON shape:
+{
+  "summary": "short rebuild summary",
+  "duplicate_topic_count": 0,
+  "conflict_topic_count": 0,
+  "projects": [
+    {
+      "project_key": "stable lower-kebab-case key",
+      "project_name": "project name users would recognize",
+      "current_status": "planned | in_progress | done",
+      "summary": "compact rolling project memory",
+      "latest_progress": "latest meaningful update or blocker",
+      "retained_l1_ids": ["l1-1", "l1-2"]
+    }
+  ],
+  "deleted_project_keys": ["old-project-key"],
+  "l1_issues": [
+    {
+      "issue_type": "duplicate | conflict | isolated",
+      "title": "short issue title",
+      "l1_ids": ["l1-1", "l1-2"],
+      "related_project_keys": ["project-key"]
+    }
+  ]
+}
+`.trim();
+
+const DREAM_GLOBAL_PROFILE_REWRITE_SYSTEM_PROMPT = `
+You are the Dream global profile rewrite engine for a layered conversational memory system.
+
+Your job is to rewrite the global profile using only stable signals supported by the supplied L1 windows and the planned Dream project rebuild.
+
+Rules:
+- The global profile stores stable user preferences, identity, habits, constraints, working style, and long-lived relationships.
+- Do not include daily events, diary-like time details, or temporary project updates.
+- Use only supplied L1 windows as evidence. Do not invent new traits.
+- source_l1_ids must be an exact supporting set chosen from the supplied L1 ids.
+- Only include signals that are stable across multiple windows, or clearly override an older profile statement with stronger recent evidence.
+- If the existing profile is still mostly valid, rewrite it conservatively instead of discarding everything.
+- Natural-language output should follow the dominant language already present in the supplied evidence.
+- Return valid JSON only.
+
+Use this exact JSON shape:
+{
+  "profile_text": "rewritten global profile paragraph",
+  "source_l1_ids": ["l1-1", "l1-2"],
+  "conflict_with_existing": false
 }
 `.trim();
 
@@ -950,6 +1226,209 @@ function buildGlobalProfilePrompt(input: LlmGlobalProfileInput): string {
   }, null, 2);
 }
 
+function buildDreamReviewPrompt(input: LlmDreamReviewInput): string {
+  return JSON.stringify({
+    review_focus: input.focus,
+    governance_scope: {
+      source_of_truth: "recent_l1_windows",
+      primary_targets: ["l2_project", "global_profile"],
+      time_layer_policy: "integrity_notes_only_do_not_rewrite",
+      read_only: true,
+    },
+    current_profile: input.profile
+      ? {
+          id: input.profile.recordId,
+          text: truncateForPrompt(input.profile.profileText, 360),
+          source_l1_ids: input.profile.sourceL1Ids.slice(-12),
+        }
+      : null,
+    current_l2_projects: input.l2Projects.map((project) => ({
+      id: project.l2IndexId,
+      project_key: project.projectKey,
+      project_name: project.projectName,
+      summary: truncateForPrompt(project.summary, 240),
+      current_status: project.currentStatus,
+      latest_progress: truncateForPrompt(project.latestProgress, 180),
+      l1_source: project.l1Source.slice(-8),
+      updated_at: project.updatedAt,
+    })),
+    recent_l1_windows: input.l1Windows.map((window) => ({
+      id: window.l1IndexId,
+      session_key: window.sessionKey,
+      time_period: window.timePeriod,
+      started_at: window.startedAt,
+      ended_at: window.endedAt,
+      summary: truncateForPrompt(window.summary, 220),
+      situation_time_info: truncateForPrompt(window.situationTimeInfo, 180),
+      project_details: window.projectDetails.map((project) => ({
+        key: project.key,
+        name: project.name,
+        status: project.status,
+        summary: truncateForPrompt(project.summary, 180),
+        latest_progress: truncateForPrompt(project.latestProgress, 140),
+        confidence: project.confidence,
+      })),
+      facts: window.facts.map((fact) => ({
+        key: fact.factKey,
+        value: truncateForPrompt(fact.factValue, 140),
+        confidence: fact.confidence,
+      })).slice(0, 10),
+    })),
+    suspicious_l0_previews: input.l0Sessions.map((session) => ({
+      id: session.l0IndexId,
+      session_key: session.sessionKey,
+      timestamp: session.timestamp,
+      preview_messages: session.messages.slice(-4).map((message) => ({
+        role: message.role,
+        content: truncateForPrompt(message.content, 180),
+      })),
+    })),
+    time_layer_integrity_notes: input.timeLayerNotes.map((note) => ({
+      title: note.title,
+      rationale: truncateForPrompt(note.rationale, 220),
+      confidence: note.confidence,
+      evidence_refs: note.evidenceRefs,
+    })),
+    evidence_refs: input.evidenceRefs.map((ref) => ({
+      ref_id: ref.refId,
+      level: ref.level,
+      id: ref.id,
+      label: truncateForPrompt(ref.label, 120),
+      summary: truncateForPrompt(ref.summary, 220),
+    })),
+  }, null, 2);
+}
+
+function buildDreamProjectRebuildPrompt(input: LlmDreamProjectRebuildInput): string {
+  return JSON.stringify({
+    governance_scope: {
+      mode: "manual_dream_rebuild",
+      primary_truth: "all_l1_windows",
+      writable_targets: ["l2_project"],
+      read_only_targets: ["l1", "l2_time"],
+      profile_context_included: Boolean(input.profile),
+    },
+    current_profile: input.profile
+      ? {
+          id: input.profile.recordId,
+          text: truncateForPrompt(input.profile.profileText, 360),
+          source_l1_ids: input.profile.sourceL1Ids.slice(-16),
+        }
+      : null,
+    current_l2_projects: input.currentProjects.map((project) => ({
+      id: project.l2IndexId,
+      project_key: project.projectKey,
+      project_name: project.projectName,
+      current_status: project.currentStatus,
+      summary: truncateForPrompt(project.summary, 260),
+      latest_progress: truncateForPrompt(project.latestProgress, 180),
+      l1_source: project.l1Source.slice(-12),
+      updated_at: project.updatedAt,
+    })),
+    l1_windows: input.l1Windows.map((window) => ({
+      id: window.l1IndexId,
+      time_period: window.timePeriod,
+      started_at: window.startedAt,
+      ended_at: window.endedAt,
+      summary: truncateForPrompt(window.summary, 220),
+      situation_time_info: truncateForPrompt(window.situationTimeInfo, 180),
+      facts: window.facts.map((fact) => ({
+        key: fact.factKey,
+        value: truncateForPrompt(fact.factValue, 120),
+        confidence: fact.confidence,
+      })).slice(0, 8),
+      project_details: window.projectDetails.map((project) => ({
+        key: project.key,
+        name: project.name,
+        status: project.status,
+        summary: truncateForPrompt(project.summary, 160),
+        latest_progress: truncateForPrompt(project.latestProgress, 120),
+        confidence: project.confidence,
+      })).slice(0, 6),
+    })),
+    suspicious_l0_previews: input.l0Sessions.map((session) => ({
+      id: session.l0IndexId,
+      session_key: session.sessionKey,
+      timestamp: session.timestamp,
+      preview_messages: session.messages.slice(-4).map((message) => ({
+        role: message.role,
+        content: truncateForPrompt(message.content, 180),
+      })),
+    })),
+    local_clusters: input.clusters.map((cluster) => ({
+      cluster_id: cluster.clusterId,
+      label: truncateForPrompt(cluster.label, 120),
+      candidate_keys: cluster.candidateKeys.slice(0, 8),
+      candidate_names: cluster.candidateNames.map((value) => truncateForPrompt(value, 80)).slice(0, 8),
+      current_project_keys: cluster.currentProjectKeys.slice(0, 8),
+      l1_ids: cluster.l1Ids.slice(0, 16),
+      statuses: cluster.statuses,
+      summaries: cluster.summaries.map((value) => truncateForPrompt(value, 140)).slice(0, 6),
+      latest_progresses: cluster.latestProgresses.map((value) => truncateForPrompt(value, 120)).slice(0, 6),
+      issue_hints: cluster.issueHints,
+      representative_windows: cluster.representativeWindows.slice(0, 4).map((window) => ({
+        l1_index_id: window.l1IndexId,
+        ended_at: window.endedAt,
+        summary: truncateForPrompt(window.summary, 140),
+      })),
+    })),
+  }, null, 2);
+}
+
+function buildDreamGlobalProfileRewritePrompt(input: LlmDreamGlobalProfileRewriteInput): string {
+  return JSON.stringify({
+    governance_scope: {
+      mode: "manual_dream_profile_rewrite",
+      stable_only: true,
+      exact_source_pruning: true,
+    },
+    existing_profile: input.existingProfile
+      ? {
+          id: input.existingProfile.recordId,
+          text: truncateForPrompt(input.existingProfile.profileText, 420),
+          source_l1_ids: input.existingProfile.sourceL1Ids.slice(-20),
+        }
+      : null,
+    planned_projects: input.plannedProjects.map((project) => ({
+      project_key: project.projectKey,
+      project_name: project.projectName,
+      current_status: project.currentStatus,
+      summary: truncateForPrompt(project.summary, 200),
+      latest_progress: truncateForPrompt(project.latestProgress, 140),
+      retained_l1_ids: project.retainedL1Ids.slice(0, 16),
+    })),
+    current_projects: input.currentProjects.map((project) => ({
+      project_key: project.projectKey,
+      project_name: project.projectName,
+      current_status: project.currentStatus,
+      summary: truncateForPrompt(project.summary, 180),
+      l1_source: project.l1Source.slice(-12),
+    })),
+    l1_windows: input.l1Windows.map((window) => ({
+      id: window.l1IndexId,
+      ended_at: window.endedAt,
+      summary: truncateForPrompt(window.summary, 220),
+      situation_time_info: truncateForPrompt(window.situationTimeInfo, 160),
+      facts: window.facts.map((fact) => ({
+        key: fact.factKey,
+        value: truncateForPrompt(fact.factValue, 140),
+        confidence: fact.confidence,
+      })).slice(0, 12),
+      project_details: window.projectDetails.map((project) => ({
+        key: project.key,
+        name: project.name,
+        status: project.status,
+      })).slice(0, 6),
+    })),
+    l1_issues: input.l1Issues.map((issue) => ({
+      issue_type: issue.issueType,
+      title: truncateForPrompt(issue.title, 120),
+      l1_ids: issue.l1Ids.slice(0, 12),
+      related_project_keys: issue.relatedProjectKeys.slice(0, 8),
+    })),
+  }, null, 2);
+}
+
 function buildHop1RoutePrompt(input: LlmMemoryRouteInput): string {
   const currentLocalDate = new Date().toLocaleDateString("en-CA");
   return JSON.stringify({
@@ -1097,6 +1576,146 @@ function slugifyKeyPart(value: string): string {
 function clampConfidence(value: unknown, fallback: number): number {
   if (typeof value !== "number" || Number.isNaN(value)) return fallback;
   return Math.max(0, Math.min(1, value));
+}
+
+function normalizeDreamTarget(value: unknown, fallback: DreamReviewFinding["target"]): DreamReviewFinding["target"] {
+  if (value === "l2_project" || value === "global_profile" || value === "l1_only" || value === "time_note") {
+    return value;
+  }
+  return fallback;
+}
+
+function normalizeDreamEvidenceRefs(items: unknown, allowedRefs: ReadonlySet<string>): string[] {
+  if (!Array.isArray(items)) return [];
+  return Array.from(new Set(
+    items
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item && allowedRefs.has(item)),
+  )).slice(0, 8);
+}
+
+function normalizeDreamFinding(
+  item: unknown,
+  allowedRefs: ReadonlySet<string>,
+  fallbackTarget: DreamReviewFinding["target"],
+): DreamReviewFinding | null {
+  if (!isRecord(item)) return null;
+  const title = typeof item.title === "string" ? normalizeWhitespace(item.title) : "";
+  const rationale = typeof item.rationale === "string" ? normalizeWhitespace(item.rationale) : "";
+  if (!title || !rationale) return null;
+  return {
+    title: truncate(title, 120),
+    rationale: truncate(rationale, 320),
+    confidence: clampConfidence(item.confidence, 0.65),
+    target: normalizeDreamTarget(item.target, fallbackTarget),
+    evidenceRefs: normalizeDreamEvidenceRefs(item.evidence_refs, allowedRefs),
+  };
+}
+
+function normalizeDreamFindings(
+  items: unknown,
+  allowedRefs: ReadonlySet<string>,
+  fallbackTarget: DreamReviewFinding["target"],
+): DreamReviewFinding[] {
+  if (!Array.isArray(items)) return [];
+  const findings: DreamReviewFinding[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const normalized = normalizeDreamFinding(item, allowedRefs, fallbackTarget);
+    if (!normalized) continue;
+    const dedupeKey = `${normalized.target}:${normalized.title}:${normalized.rationale}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    findings.push(normalized);
+    if (findings.length >= 8) break;
+  }
+  return findings;
+}
+
+function passesDreamProfileGate(
+  finding: DreamReviewFinding,
+  evidenceRefs: ReadonlyMap<string, DreamEvidenceRef>,
+): boolean {
+  const l1Count = finding.evidenceRefs.reduce((count, refId) => {
+    const ref = evidenceRefs.get(refId);
+    return ref?.level === "l1" ? count + 1 : count;
+  }, 0);
+  if (l1Count >= 2) return true;
+  const hasProfileConflictContext = finding.evidenceRefs.some((refId) => evidenceRefs.get(refId)?.level === "profile");
+  return hasProfileConflictContext && l1Count >= 1;
+}
+
+function normalizeDreamProjectKey(value: unknown, fallback: string): string {
+  const candidate = typeof value === "string" ? normalizeWhitespace(value) : "";
+  if (!candidate) return fallback;
+  return slugifyKeyPart(candidate);
+}
+
+function normalizeDreamProjectName(value: unknown, fallback: string): string {
+  const candidate = typeof value === "string" ? normalizeWhitespace(value) : "";
+  return truncate(candidate || fallback || "Dream Project", 120);
+}
+
+function normalizeDreamL1Ids(items: unknown, allowedIds: ReadonlySet<string>): string[] {
+  if (!Array.isArray(items)) return [];
+  return Array.from(new Set(
+    items
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item && allowedIds.has(item)),
+  )).slice(0, 32);
+}
+
+function normalizeDreamProjectKeys(items: unknown): string[] {
+  if (!Array.isArray(items)) return [];
+  return Array.from(new Set(
+    items
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => slugifyKeyPart(item))
+      .filter(Boolean),
+  )).slice(0, 24);
+}
+
+function normalizeDreamL1IssueType(value: unknown): LlmDreamL1Issue["issueType"] {
+  if (value === "duplicate" || value === "conflict" || value === "isolated") return value;
+  return "isolated";
+}
+
+function normalizeDreamProjectPlanItem(
+  item: unknown,
+  allowedL1Ids: ReadonlySet<string>,
+): LlmDreamProjectRebuildOutput["projects"][number] | null {
+  if (!isRecord(item)) return null;
+  const retainedL1Ids = normalizeDreamL1Ids(item.retained_l1_ids, allowedL1Ids);
+  if (retainedL1Ids.length === 0) return null;
+  const projectKey = normalizeDreamProjectKey(item.project_key, retainedL1Ids[0] ?? "dream-project");
+  const projectName = normalizeDreamProjectName(item.project_name, projectKey);
+  const summary = typeof item.summary === "string" ? truncate(normalizeWhitespace(item.summary), 320) : "";
+  const latestProgress = typeof item.latest_progress === "string"
+    ? truncate(normalizeWhitespace(item.latest_progress), 220)
+    : "";
+  return {
+    projectKey,
+    projectName,
+    currentStatus: normalizeStatus(item.current_status),
+    summary: summary || projectName,
+    latestProgress: latestProgress || summary || projectName,
+    retainedL1Ids,
+  };
+}
+
+function normalizeDreamL1Issue(item: unknown, allowedL1Ids: ReadonlySet<string>): LlmDreamL1Issue | null {
+  if (!isRecord(item)) return null;
+  const l1Ids = normalizeDreamL1Ids(item.l1_ids, allowedL1Ids);
+  if (l1Ids.length === 0) return null;
+  const title = typeof item.title === "string" ? truncate(normalizeWhitespace(item.title), 160) : "";
+  return {
+    issueType: normalizeDreamL1IssueType(item.issue_type),
+    title: title || `Dream issue for ${l1Ids[0]}`,
+    l1Ids,
+    relatedProjectKeys: normalizeDreamProjectKeys(item.related_project_keys),
+  };
 }
 
 function normalizeStatus(value: unknown): ProjectStatus {
@@ -1840,6 +2459,146 @@ export class LlmMemoryExtractor {
 
     const fallbackFacts = input.l1.facts.map((fact) => fact.factValue).filter(Boolean).slice(0, 8).join("；");
     return truncate(input.existingProfile || fallbackFacts || input.l1.summary, 420);
+  }
+
+  async reviewDream(input: LlmDreamReviewInput): Promise<LlmDreamReviewResult> {
+    const emptySummary = input.evidenceRefs.length === 0
+      ? "Not enough indexed memory evidence to run Dream review yet."
+      : "No reliable Dream findings were produced from the selected evidence.";
+    const emptyResult = (): LlmDreamReviewResult => ({
+      summary: emptySummary,
+      projectRebuild: [],
+      profileSuggestions: [],
+      cleanup: [],
+      ambiguous: [],
+      noAction: [],
+    });
+
+    if (input.evidenceRefs.length === 0) return emptyResult();
+
+    const allowedRefs = new Set(input.evidenceRefs.map((ref) => ref.refId));
+    const evidenceRefsById = new Map(input.evidenceRefs.map((ref) => [ref.refId, ref] as const));
+    try {
+      const raw = await this.callStructuredJson({
+        systemPrompt: DREAM_REVIEW_SYSTEM_PROMPT,
+        userPrompt: buildDreamReviewPrompt(input),
+        requestLabel: "Dream review",
+        timeoutMs: 20_000,
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+      });
+      const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawDreamReviewPayload;
+      const summary = typeof parsed.summary === "string"
+        ? truncate(normalizeWhitespace(parsed.summary), 280)
+        : emptySummary;
+      const profileSuggestions = normalizeDreamFindings(parsed.profile_suggestions, allowedRefs, "global_profile")
+        .filter((finding) => passesDreamProfileGate(finding, evidenceRefsById));
+      return {
+        summary: summary || emptySummary,
+        projectRebuild: normalizeDreamFindings(parsed.project_rebuild, allowedRefs, "l2_project"),
+        profileSuggestions,
+        cleanup: normalizeDreamFindings(parsed.cleanup, allowedRefs, "l1_only"),
+        ambiguous: normalizeDreamFindings(parsed.ambiguous, allowedRefs, "l1_only"),
+        noAction: normalizeDreamFindings(parsed.no_action, allowedRefs, "l1_only"),
+      };
+    } catch (error) {
+      this.logger?.warn?.(`[clawxmemory] dream review fallback: ${String(error)}`);
+      return emptyResult();
+    }
+  }
+
+  async planDreamProjectRebuild(input: LlmDreamProjectRebuildInput): Promise<LlmDreamProjectRebuildOutput> {
+    if (input.l1Windows.length === 0) {
+      throw new Error("No L1 windows are available for Dream reconstruction.");
+    }
+
+    const allowedL1Ids = new Set(input.l1Windows.map((window) => window.l1IndexId));
+    const currentProjectKeys = new Set(input.currentProjects.map((project) => project.projectKey));
+    const clusterProjectKeys = new Set(input.clusters.flatMap((cluster) => [
+      ...cluster.candidateKeys,
+      ...cluster.currentProjectKeys,
+    ]).filter(Boolean));
+    const raw = await this.callStructuredJson({
+      systemPrompt: DREAM_PROJECT_REBUILD_SYSTEM_PROMPT,
+      userPrompt: buildDreamProjectRebuildPrompt(input),
+      requestLabel: "Dream project rebuild",
+      timeoutMs: 30_000,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+    });
+    const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawDreamProjectPlanPayload;
+    const normalizedProjects = Array.isArray(parsed.projects)
+      ? parsed.projects
+          .map((item) => normalizeDreamProjectPlanItem(item, allowedL1Ids))
+          .filter((item): item is LlmDreamProjectRebuildOutput["projects"][number] => Boolean(item))
+      : [];
+
+    const dedupedProjects: LlmDreamProjectRebuildOutput["projects"] = [];
+    const seenProjectKeys = new Set<string>();
+    for (const item of normalizedProjects) {
+      if (seenProjectKeys.has(item.projectKey)) continue;
+      seenProjectKeys.add(item.projectKey);
+      dedupedProjects.push(item);
+      if (dedupedProjects.length >= 20) break;
+    }
+    if (dedupedProjects.length === 0) {
+      throw new Error("Dream project rebuild returned no valid projects.");
+    }
+
+    const deletedProjectKeys = Array.from(new Set(
+      normalizeDreamProjectKeys(parsed.deleted_project_keys)
+        .filter((key) => currentProjectKeys.has(key) || clusterProjectKeys.has(key)),
+    ));
+
+    const l1Issues = Array.isArray(parsed.l1_issues)
+      ? parsed.l1_issues
+          .map((item) => normalizeDreamL1Issue(item, allowedL1Ids))
+          .filter((item): item is LlmDreamL1Issue => Boolean(item))
+          .slice(0, 20)
+      : [];
+
+    return {
+      summary: typeof parsed.summary === "string"
+        ? truncate(normalizeWhitespace(parsed.summary), 320)
+        : "Dream project rebuild completed.",
+      duplicateTopicCount: Math.max(
+        0,
+        Math.floor(typeof parsed.duplicate_topic_count === "number" ? parsed.duplicate_topic_count : l1Issues.filter((item) => item.issueType === "duplicate").length),
+      ),
+      conflictTopicCount: Math.max(
+        0,
+        Math.floor(typeof parsed.conflict_topic_count === "number" ? parsed.conflict_topic_count : l1Issues.filter((item) => item.issueType === "conflict").length),
+      ),
+      projects: dedupedProjects,
+      deletedProjectKeys,
+      l1Issues,
+    };
+  }
+
+  async rewriteDreamGlobalProfile(input: LlmDreamGlobalProfileRewriteInput): Promise<LlmDreamGlobalProfileRewriteOutput> {
+    if (input.l1Windows.length === 0) {
+      throw new Error("No L1 windows are available for Dream profile rewrite.");
+    }
+
+    const allowedL1Ids = new Set(input.l1Windows.map((window) => window.l1IndexId));
+    const raw = await this.callStructuredJson({
+      systemPrompt: DREAM_GLOBAL_PROFILE_REWRITE_SYSTEM_PROMPT,
+      userPrompt: buildDreamGlobalProfileRewritePrompt(input),
+      requestLabel: "Dream global profile rewrite",
+      timeoutMs: 20_000,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+    });
+    const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawDreamGlobalProfileRewritePayload;
+    const profileText = typeof parsed.profile_text === "string"
+      ? truncate(normalizeWhitespace(parsed.profile_text), 420)
+      : "";
+    if (!profileText) {
+      throw new Error("Dream global profile rewrite returned an empty profile.");
+    }
+    const sourceL1Ids = normalizeDreamL1Ids(parsed.source_l1_ids, allowedL1Ids);
+    return {
+      profileText,
+      sourceL1Ids,
+      conflictWithExisting: normalizeBoolean(parsed.conflict_with_existing, false),
+    };
   }
 
   async decideMemoryLookup(input: LlmMemoryRouteInput): Promise<Hop1LookupDecision> {

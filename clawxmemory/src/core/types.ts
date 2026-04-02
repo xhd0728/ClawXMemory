@@ -344,3 +344,34 @@ export interface MemoryUiSnapshot {
   recentSessions: L0SessionRecord[];
   globalProfile: GlobalProfileRecord;
 }
+
+export type DreamReviewFocus = "all" | "projects" | "profile";
+
+export type DreamReviewTarget = "l2_project" | "global_profile" | "l1_only" | "time_note";
+
+export interface DreamEvidenceRef {
+  refId: string;
+  level: "profile" | "l2_project" | "l2_time" | "l1" | "l0";
+  id: string;
+  label: string;
+  summary: string;
+}
+
+export interface DreamReviewFinding {
+  title: string;
+  rationale: string;
+  confidence: number;
+  target: DreamReviewTarget;
+  evidenceRefs: string[];
+}
+
+export interface DreamReviewResult {
+  summary: string;
+  projectRebuild: DreamReviewFinding[];
+  profileSuggestions: DreamReviewFinding[];
+  cleanup: DreamReviewFinding[];
+  ambiguous: DreamReviewFinding[];
+  noAction: DreamReviewFinding[];
+  timeLayerNotes: DreamReviewFinding[];
+  evidenceRefs: DreamEvidenceRef[];
+}

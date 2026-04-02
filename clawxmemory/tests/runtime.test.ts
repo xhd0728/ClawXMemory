@@ -4,6 +4,16 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryPluginRuntime, applyManagedMemoryBoundaryConfig } from "../src/runtime.js";
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("MemoryPluginRuntime", () => {
   const cleanupPaths: string[] = [];
   const runtimes: MemoryPluginRuntime[] = [];
@@ -1154,5 +1164,166 @@ describe("MemoryPluginRuntime", () => {
     expect(writeConfigFile).toHaveBeenCalledTimes(1);
     expect(runCommandWithTimeout).toHaveBeenCalledTimes(1);
     expect(startBackgroundRepair).not.toHaveBeenCalled();
+  });
+
+  it("runs Dream after pending queue work and prep-flushes before reconstruction", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const pendingQueue = deferred<{
+      l0Captured: number;
+      l1Created: number;
+      l2TimeUpdated: number;
+      l2ProjectUpdated: number;
+      profileUpdated: number;
+      failed: number;
+    }>();
+    (runtime as never as { queuePromise: Promise<unknown> }).queuePromise = pendingQueue.promise;
+
+    const prepFlush = {
+      l0Captured: 1,
+      l1Created: 1,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    };
+    const flushSpy = vi.spyOn(runtime as never as {
+      flushAllNow: (reason: string, options?: { allowWhileDream?: boolean }) => Promise<typeof prepFlush>;
+    }, "flushAllNow").mockResolvedValue(prepFlush);
+    const dreamOutcome = {
+      reviewedL1: 3,
+      rewrittenProjects: 1,
+      deletedProjects: 0,
+      profileUpdated: true,
+      duplicateTopicCount: 0,
+      conflictTopicCount: 0,
+      prunedProjectL1Refs: 1,
+      prunedProfileL1Refs: 1,
+      summary: "ok",
+    };
+    const dreamSpy = vi.spyOn((runtime as never as {
+      dreamRewriter: { run: () => Promise<typeof dreamOutcome> };
+    }).dreamRewriter, "run").mockResolvedValue(dreamOutcome);
+
+    const dreamPromise = (runtime as never as {
+      runDreamNow: (trigger: "manual") => Promise<Record<string, unknown>>;
+    }).runDreamNow("manual");
+    expect(flushSpy).not.toHaveBeenCalled();
+    expect(dreamSpy).not.toHaveBeenCalled();
+
+    pendingQueue.resolve({
+      l0Captured: 0,
+      l1Created: 0,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    });
+
+    await vi.waitFor(() => {
+      expect(flushSpy).toHaveBeenCalledWith("dream_prep", { allowWhileDream: true });
+    });
+    await vi.waitFor(() => {
+      expect(dreamSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const result = await dreamPromise;
+    expect(flushSpy.mock.invocationCallOrder[0]).toBeLessThan(dreamSpy.mock.invocationCallOrder[0]);
+    expect(result).toMatchObject({
+      prepFlush,
+      reviewedL1: 3,
+      rewrittenProjects: 1,
+    });
+  });
+
+  it("queues heartbeat work while Dream is running and rejects concurrent Dream runs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const prepFlush = {
+      l0Captured: 0,
+      l1Created: 0,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    };
+    vi.spyOn(runtime as never as {
+      flushAllNow: (reason: string, options?: { allowWhileDream?: boolean }) => Promise<typeof prepFlush>;
+    }, "flushAllNow").mockResolvedValue(prepFlush);
+
+    const dreamDeferred = deferred<{
+      reviewedL1: number;
+      rewrittenProjects: number;
+      deletedProjects: number;
+      profileUpdated: boolean;
+      duplicateTopicCount: number;
+      conflictTopicCount: number;
+      prunedProjectL1Refs: number;
+      prunedProfileL1Refs: number;
+      summary: string;
+    }>();
+    vi.spyOn((runtime as never as {
+      dreamRewriter: { run: () => Promise<unknown> };
+    }).dreamRewriter, "run").mockImplementation(() => dreamDeferred.promise);
+
+    const drainSpy = vi.spyOn(runtime as never as {
+      drainIndexQueue: () => Promise<typeof prepFlush>;
+    }, "drainIndexQueue").mockResolvedValue(prepFlush);
+
+    const dreamPromise = (runtime as never as {
+      runDreamNow: (trigger: "manual") => Promise<unknown>;
+    }).runDreamNow("manual");
+    await vi.waitFor(() => {
+      expect((runtime as never as { dreamRunLocked: boolean }).dreamRunLocked).toBe(true);
+    });
+
+    await expect((runtime as never as {
+      runDreamNow: (trigger: "manual") => Promise<unknown>;
+    }).runDreamNow("manual")).rejects.toThrow("already running");
+
+    const queuedIndexPromise = (runtime as never as {
+      requestIndexRun: (reason: string, sessionKeys?: string[]) => Promise<unknown>;
+    }).requestIndexRun("scheduled", ["session-a"]);
+    expect(drainSpy).not.toHaveBeenCalled();
+
+    dreamDeferred.resolve({
+      reviewedL1: 2,
+      rewrittenProjects: 1,
+      deletedProjects: 0,
+      profileUpdated: true,
+      duplicateTopicCount: 0,
+      conflictTopicCount: 0,
+      prunedProjectL1Refs: 0,
+      prunedProfileL1Refs: 0,
+      summary: "done",
+    });
+
+    await queuedIndexPromise;
+    await dreamPromise;
+    expect(drainSpy).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GlobalProfileRecord, L0SessionRecord, L1WindowRecord } from "../src/core/index.js";
+import type { GlobalProfileRecord, L0SessionRecord, L1WindowRecord, L2ProjectIndexRecord } from "../src/core/index.js";
 import { LlmMemoryExtractor } from "../src/core/index.js";
 
 function createExtractor() {
@@ -45,6 +45,20 @@ function createL0(): L0SessionRecord {
     source: "openclaw",
     indexed: true,
     createdAt: "2026-04-01T09:30:00.000Z",
+  };
+}
+
+function createProject(): L2ProjectIndexRecord {
+  return {
+    l2IndexId: "l2-project-1",
+    projectKey: "travel",
+    projectName: "Travel",
+    summary: "Travel planning is underway.",
+    currentStatus: "in_progress",
+    latestProgress: "Budget route planning.",
+    l1Source: ["l1-1", "l1-stale"],
+    createdAt: "2026-04-01T00:00:00.000Z",
+    updatedAt: "2026-04-01T10:00:00.000Z",
   };
 }
 
@@ -225,5 +239,235 @@ describe("LlmMemoryExtractor hop debug trace", () => {
       errored: true,
       timedOut: true,
     }));
+  });
+
+  it("parses Dream review output into grouped findings", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue(JSON.stringify({
+        summary: "Recent L1 windows suggest one project summary should be rebuilt.",
+        project_rebuild: [
+          {
+            title: "Project summary lags recent L1",
+            rationale: "The newest L1 windows carry a clearer project stage than the current L2 project summary.",
+            confidence: 0.84,
+            target: "l2_project",
+            evidence_refs: ["l1:l1-1", "l2_project:l2-project-1"],
+          },
+        ],
+        profile_suggestions: [
+          {
+            title: "Promote stable preference into profile",
+            rationale: "Two recent L1 windows reinforce the same planning preference.",
+            confidence: 0.71,
+            target: "global_profile",
+            evidence_refs: ["profile:global_profile_record", "l1:l1-1"],
+          },
+        ],
+        cleanup: [],
+        ambiguous: [],
+        no_action: [],
+      }));
+
+    const result = await extractor.reviewDream({
+      focus: "all",
+      profile: createProfile(),
+      l2Projects: [
+        {
+          l2IndexId: "l2-project-1",
+          projectKey: "travel",
+          projectName: "Travel",
+          summary: "Travel planning is underway.",
+          currentStatus: "in_progress",
+          latestProgress: "Budget route planning.",
+          l1Source: ["l1-1"],
+          createdAt: "2026-04-01T00:00:00.000Z",
+          updatedAt: "2026-04-01T10:00:00.000Z",
+        },
+      ],
+      l1Windows: [createL1()],
+      l0Sessions: [createL0()],
+      timeLayerNotes: [],
+      evidenceRefs: [
+        { refId: "profile:global_profile_record", level: "profile", id: "global_profile_record", label: "Global Profile", summary: "User likes spicy food." },
+        { refId: "l2_project:l2-project-1", level: "l2_project", id: "l2-project-1", label: "Travel", summary: "Travel planning is underway." },
+        { refId: "l1:l1-1", level: "l1", id: "l1-1", label: "2026-04-01 morning", summary: "Discussed travel and retrieval debugging." },
+      ],
+    });
+
+    expect(result.summary).toContain("project summary");
+    expect(result.projectRebuild).toEqual([
+      expect.objectContaining({
+        title: "Project summary lags recent L1",
+        target: "l2_project",
+        evidenceRefs: ["l1:l1-1", "l2_project:l2-project-1"],
+      }),
+    ]);
+    expect(result.profileSuggestions).toEqual([
+      expect.objectContaining({
+        target: "global_profile",
+      }),
+    ]);
+  });
+
+  it("falls back to an empty Dream review when the model output is malformed", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue("not-json");
+
+    const result = await extractor.reviewDream({
+      focus: "projects",
+      profile: createProfile(),
+      l2Projects: [],
+      l1Windows: [createL1()],
+      l0Sessions: [],
+      timeLayerNotes: [],
+      evidenceRefs: [
+        { refId: "l1:l1-1", level: "l1", id: "l1-1", label: "2026-04-01 morning", summary: "Discussed travel and retrieval debugging." },
+      ],
+    });
+
+    expect(result.summary).toContain("No reliable Dream findings");
+    expect(result.projectRebuild).toEqual([]);
+    expect(result.profileSuggestions).toEqual([]);
+  });
+
+  it("parses Dream project rebuild output into exact retained project sources", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue(JSON.stringify({
+        summary: "Merged duplicate travel topics into one project.",
+        duplicate_topic_count: 1,
+        conflict_topic_count: 0,
+        projects: [
+          {
+            project_key: "travel-plan",
+            project_name: "Travel Plan",
+            current_status: "in_progress",
+            summary: "The travel project was consolidated from recent L1 windows.",
+            latest_progress: "Kept only the strongest recent L1 window.",
+            retained_l1_ids: ["l1-1"],
+          },
+        ],
+        deleted_project_keys: ["travel"],
+        l1_issues: [
+          {
+            issue_type: "duplicate",
+            title: "Recent L1 windows describe the same travel topic",
+            l1_ids: ["l1-1"],
+            related_project_keys: ["travel", "travel-plan"],
+          },
+        ],
+      }));
+
+    const result = await extractor.planDreamProjectRebuild({
+      currentProjects: [createProject()],
+      profile: createProfile(),
+      l1Windows: [createL1()],
+      l0Sessions: [createL0()],
+      clusters: [
+        {
+          clusterId: "cluster-1",
+          label: "Travel Plan",
+          candidateKeys: ["travel"],
+          candidateNames: ["Travel"],
+          currentProjectKeys: ["travel"],
+          l1Ids: ["l1-1"],
+          statuses: ["in_progress"],
+          summaries: ["Travel planning is underway."],
+          latestProgresses: ["Budget route planning."],
+          issueHints: ["duplicate"],
+          representativeWindows: [{ l1IndexId: "l1-1", endedAt: "2026-04-01T09:00:00.000Z", summary: "Discussed travel and retrieval debugging." }],
+        },
+      ],
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      duplicateTopicCount: 1,
+      conflictTopicCount: 0,
+      deletedProjectKeys: ["travel"],
+      projects: [
+        expect.objectContaining({
+          projectKey: "travel-plan",
+          retainedL1Ids: ["l1-1"],
+        }),
+      ],
+      l1Issues: [
+        expect.objectContaining({
+          issueType: "duplicate",
+          l1Ids: ["l1-1"],
+        }),
+      ],
+    }));
+  });
+
+  it("parses Dream global profile rewrites with exact supporting L1 ids", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue(JSON.stringify({
+        profile_text: "用户偏好中文沟通，并会反复打磨检索与记忆架构。",
+        source_l1_ids: ["l1-1"],
+        conflict_with_existing: true,
+      }));
+
+    const result = await extractor.rewriteDreamGlobalProfile({
+      existingProfile: createProfile(),
+      l1Windows: [createL1()],
+      currentProjects: [createProject()],
+      plannedProjects: [
+        {
+          projectKey: "travel-plan",
+          projectName: "Travel Plan",
+          currentStatus: "in_progress",
+          summary: "Consolidated travel project memory.",
+          latestProgress: "Kept one retained L1.",
+          retainedL1Ids: ["l1-1"],
+        },
+      ],
+      l1Issues: [],
+    });
+
+    expect(result).toEqual({
+      profileText: "用户偏好中文沟通，并会反复打磨检索与记忆架构。",
+      sourceL1Ids: ["l1-1"],
+      conflictWithExisting: true,
+    });
+  });
+
+  it("throws when Dream project rebuild output is malformed or empty", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue("not-json");
+
+    await expect(extractor.planDreamProjectRebuild({
+      currentProjects: [createProject()],
+      profile: createProfile(),
+      l1Windows: [createL1()],
+      l0Sessions: [createL0()],
+      clusters: [],
+    })).rejects.toThrow();
+  });
+
+  it("throws when Dream global profile rewrite output is malformed", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue("not-json");
+
+    await expect(extractor.rewriteDreamGlobalProfile({
+      existingProfile: createProfile(),
+      l1Windows: [createL1()],
+      currentProjects: [createProject()],
+      plannedProjects: [
+        {
+          projectKey: "travel-plan",
+          projectName: "Travel Plan",
+          currentStatus: "in_progress",
+          summary: "Consolidated travel project memory.",
+          latestProgress: "Kept one retained L1.",
+          retainedL1Ids: ["l1-1"],
+        },
+      ],
+      l1Issues: [],
+    })).rejects.toThrow();
   });
 });

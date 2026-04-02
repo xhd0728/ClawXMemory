@@ -8,6 +8,7 @@ export * from "./skills/llm-extraction.js";
 export * from "./skills/intent-skill.js";
 export * from "./indexers/l1-extractor.js";
 export * from "./indexers/l2-builder.js";
+export * from "./review/dream-review.js";
 export * from "./pipeline/heartbeat.js";
 export * from "./retrieval/reasoning-loop.js";
 export * from "./storage/sqlite.js";

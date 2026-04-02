@@ -13,6 +13,18 @@ async function startUiServer(controls: Record<string, unknown> = {}): Promise<st
       getSettings: () => ({ reasoningMode: "answer_first", recallTopK: 10 }),
       saveSettings: () => ({ reasoningMode: "answer_first", recallTopK: 10 }),
       runIndexNow: async () => ({ l0Captured: 0, l1Created: 0, l2TimeUpdated: 0, l2ProjectUpdated: 0, profileUpdated: 0, failed: 0 }),
+      runDreamNow: async () => ({
+        prepFlush: { l0Captured: 0, l1Created: 0, l2TimeUpdated: 0, l2ProjectUpdated: 0, profileUpdated: 0, failed: 0 },
+        reviewedL1: 0,
+        rewrittenProjects: 0,
+        deletedProjects: 0,
+        profileUpdated: false,
+        duplicateTopicCount: 0,
+        conflictTopicCount: 0,
+        prunedProjectL1Refs: 0,
+        prunedProfileL1Refs: 0,
+        summary: "noop",
+      }),
       exportMemoryBundle: () => ({ exportedAt: "2026-04-01T00:00:00.000Z" }),
       importMemoryBundle: async () => ({ imported: {} }),
       getRuntimeOverview: () => ({ queuedSessions: 0, lastRecallMs: 0, recallTimeouts: 0, lastRecallMode: "none", currentReasoningMode: "answer_first" }),
@@ -72,6 +84,7 @@ describe("LocalUiServer static assets", () => {
     expect(html).toContain('data-board="memory_trace"');
     expect(html).toContain('id="memoryTraceBoard"');
     expect(html).toContain('data-level="memory_trace"');
+    expect(html).toContain('id="dreamRunBtn"');
     expect(html.indexOf('data-board="profile"')).toBeLessThan(html.indexOf('data-board="memory_trace"'));
     expect(html.indexOf('data-level="profile"')).toBeLessThan(html.indexOf('data-level="memory_trace"'));
     expect(html).not.toContain('id="retrievePanel"');
@@ -156,5 +169,34 @@ describe("LocalUiServer static assets", () => {
 
     const removedResponse = await fetch(`${baseUrl}/api/retrieve?q=test`);
     expect(removedResponse.status).toBe(404);
+  });
+
+  it("routes manual Dream runs through POST /api/dream/run", async () => {
+    const runDreamNow = vi.fn().mockResolvedValue({
+      prepFlush: { l0Captured: 1, l1Created: 1, l2TimeUpdated: 0, l2ProjectUpdated: 1, profileUpdated: 1, failed: 0 },
+      reviewedL1: 12,
+      rewrittenProjects: 3,
+      deletedProjects: 1,
+      profileUpdated: true,
+      duplicateTopicCount: 2,
+      conflictTopicCount: 1,
+      prunedProjectL1Refs: 4,
+      prunedProfileL1Refs: 2,
+      summary: "Dream finished",
+    });
+    const baseUrl = await startUiServer({ runDreamNow });
+
+    const postResponse = await fetch(`${baseUrl}/api/dream/run`, { method: "POST" });
+    expect(postResponse.status).toBe(200);
+    await expect(postResponse.json()).resolves.toMatchObject({
+      reviewedL1: 12,
+      rewrittenProjects: 3,
+      deletedProjects: 1,
+      profileUpdated: true,
+    });
+    expect(runDreamNow).toHaveBeenCalledTimes(1);
+
+    const getResponse = await fetch(`${baseUrl}/api/dream/run`);
+    expect(getResponse.status).toBe(405);
   });
 });

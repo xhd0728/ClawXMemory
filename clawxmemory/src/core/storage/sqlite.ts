@@ -1250,6 +1250,77 @@ export class MemoryRepository {
     return next;
   }
 
+  applyDreamRewrite(input: {
+    projects: L2ProjectIndexRecord[];
+    profileText: string;
+    profileSourceL1Ids: string[];
+  }): void {
+    const currentProfile = this.getGlobalProfileRecord();
+    const currentProjects = this.listAllL2Projects();
+    const currentProjectIds = currentProjects.map((project) => project.l2IndexId).filter(Boolean);
+    const deleteProjectLinksStmt = currentProjectIds.length > 0
+      ? this.db.prepare(`
+          DELETE FROM index_links
+          WHERE from_level = 'l2'
+            AND from_id IN (${currentProjectIds.map(() => "?").join(", ")})
+        `)
+      : null;
+    const deleteProjectRowsStmt = this.db.prepare("DELETE FROM l2_project_indexes");
+    const insertProjectStmt = this.db.prepare(`
+      INSERT INTO l2_project_indexes (
+        l2_index_id, project_key, project_name, summary, current_status, latest_progress, l1_source_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertLinkStmt = this.db.prepare(`
+      INSERT OR IGNORE INTO index_links (link_id, from_level, from_id, to_level, to_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    this.db.exec("BEGIN");
+    try {
+      if (deleteProjectLinksStmt) deleteProjectLinksStmt.run(...currentProjectIds);
+      deleteProjectRowsStmt.run();
+
+      for (const project of input.projects) {
+        insertProjectStmt.run(
+          project.l2IndexId,
+          project.projectKey,
+          project.projectName,
+          project.summary,
+          project.currentStatus,
+          project.latestProgress,
+          JSON.stringify(project.l1Source),
+          project.createdAt,
+          project.updatedAt,
+        );
+        for (const l1Id of project.l1Source) {
+          insertLinkStmt.run(
+            buildLinkId("l2", project.l2IndexId, "l1", l1Id),
+            "l2",
+            project.l2IndexId,
+            "l1",
+            l1Id,
+            project.updatedAt || nowIso(),
+          );
+        }
+      }
+
+      this.saveGlobalProfileRecord({
+        recordId: GLOBAL_PROFILE_RECORD_ID,
+        profileText: input.profileText.trim(),
+        sourceL1Ids: Array.from(new Set(input.profileSourceL1Ids.filter(Boolean))),
+        createdAt: currentProfile.createdAt,
+        updatedAt: nowIso(),
+      });
+
+      this.db.exec("COMMIT");
+      this.rebuildSearchIndexes();
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   appendToGlobalProfile(content: string): GlobalProfileRecord {
     const current = this.getGlobalProfileRecord();
     const nextText = [current.profileText, content.trim()].filter(Boolean).join("\n");

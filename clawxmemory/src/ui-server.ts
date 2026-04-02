@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   type CaseTraceRecord,
   type DashboardOverview,
+  type DreamRunResult,
   type HeartbeatStats,
   type IndexingSettings,
   MemoryRepository,
@@ -31,6 +32,7 @@ export interface UiServerControls {
   getSettings: () => IndexingSettings;
   saveSettings: (partial: Partial<IndexingSettings>) => IndexingSettings;
   runIndexNow: () => Promise<HeartbeatStats>;
+  runDreamNow: () => Promise<DreamRunResult>;
   exportMemoryBundle: () => MemoryExportBundle;
   importMemoryBundle: (bundle: MemoryExportBundle) => Promise<MemoryImportResult>;
   getRuntimeOverview: () => Pick<
@@ -313,6 +315,10 @@ export class LocalUiServer {
     if (relativePath === "/api/index/run") {
       if (upperMethod !== "POST") return sendMethodNotAllowed(res, "POST");
       return sendJson(res, await this.controls.runIndexNow());
+    }
+    if (relativePath === "/api/dream/run") {
+      if (upperMethod !== "POST") return sendMethodNotAllowed(res, "POST");
+      return sendJson(res, await this.controls.runDreamNow());
     }
     if (relativePath === "/api/snapshot") {
       const cached = cachedSnapshot();

@@ -14,6 +14,7 @@ const LOCALES = {
     "topbar.idle": "等待操作",
     "topbar.refresh": "刷新",
     "topbar.build": "索引同步",
+    "topbar.dream": "记忆 Dream",
     "topbar.overview": "仪表盘",
     "topbar.settings": "设置",
     "topbar.retrieve": "检索",
@@ -55,6 +56,9 @@ const LOCALES = {
     "confirm.sync.title": "索引同步",
     "confirm.sync.body": "将扫描最近对话并更新记忆索引，这可能需要一些时间。",
     "confirm.sync.ok": "开始同步",
+    "confirm.dream.title": "记忆 Dream",
+    "confirm.dream.body": "记忆准备开始睡觉了。它会安静整理你留下的记忆线索，重构更清晰的项目记忆与全局画像。",
+    "confirm.dream.ok": "开始 Dream",
     "confirm.clear.title": "清除记忆",
     "confirm.clear.body": "此操作将删除所有已索引的记忆数据，且不可撤销。确定继续吗？",
     "confirm.clear.ok": "确认清除",
@@ -64,6 +68,9 @@ const LOCALES = {
     "confirm.cancel": "取消",
     "status.building": "同步中…",
     "status.built": "已构建 · L0 {0} / L1 {1} / L2T {2} / L2P {3} / 画像 {4}",
+    "status.dreaming": "Dream 重构中…",
+    "status.dreamed": "Dream 完成 · 审查 L1 {0} / 重构项目 {1} / 删除项目 {2} / 画像 {3} / 重复 {4} / 冲突 {5}",
+    "status.dreamFailed": "Dream 失败：{0}",
     "status.clearing": "清空中…",
     "status.cleared": "已清空本地记忆",
     "status.exporting": "导出中…",
@@ -270,6 +277,7 @@ const LOCALES = {
     "topbar.idle": "Idle",
     "topbar.refresh": "Refresh",
     "topbar.build": "Sync Index",
+    "topbar.dream": "Dream",
     "topbar.overview": "Dashboard",
     "topbar.settings": "Settings",
     "topbar.retrieve": "Retrieve",
@@ -311,6 +319,9 @@ const LOCALES = {
     "confirm.sync.title": "Sync Index",
     "confirm.sync.body": "This will scan recent conversations and update the memory index. It may take a moment.",
     "confirm.sync.ok": "Start Sync",
+    "confirm.dream.title": "Memory Dream",
+    "confirm.dream.body": "Memory is about to drift off. It will quietly reorganize the memory traces you've left behind, rebuilding clearer project memory and a sharper global profile without touching raw L1 or time-layer memory.",
+    "confirm.dream.ok": "Run Dream",
     "confirm.clear.title": "Clear Memory",
     "confirm.clear.body": "This will permanently delete all indexed memory data. This action cannot be undone. Continue?",
     "confirm.clear.ok": "Confirm Clear",
@@ -320,6 +331,9 @@ const LOCALES = {
     "confirm.cancel": "Cancel",
     "status.building": "Syncing…",
     "status.built": "Built · L0 {0} / L1 {1} / L2T {2} / L2P {3} / Profile {4}",
+    "status.dreaming": "Dream rebuilding…",
+    "status.dreamed": "Dream complete · Reviewed L1 {0} / Rebuilt projects {1} / Deleted projects {2} / Profile {3} / Duplicates {4} / Conflicts {5}",
+    "status.dreamFailed": "Dream failed: {0}",
     "status.clearing": "Clearing…",
     "status.cleared": "Local memory cleared",
     "status.exporting": "Exporting…",
@@ -622,6 +636,7 @@ const entryList = $("#entryList");
 
 const refreshBtn = $("#refreshBtn");
 const buildNowBtn = $("#buildNowBtn");
+const dreamRunBtn = $("#dreamRunBtn");
 const settingsToggleBtn = document.getElementById("settingsToggleBtn");
 const detailToggleBtn = document.getElementById("detailToggleBtn");
 
@@ -2961,6 +2976,35 @@ async function buildNow() {
   await refreshDashboard("status.built", "success", s.l0Captured ?? 0, s.l1Created ?? 0, s.l2TimeUpdated ?? 0, s.l2ProjectUpdated ?? 0, s.profileUpdated ?? 0);
 }
 
+async function dreamRun() {
+  const ok = await showModal({
+    icon: "✦", iconClass: "icon-sync",
+    title: t("confirm.dream.title"),
+    body: t("confirm.dream.body"),
+    confirmText: t("confirm.dream.ok"),
+  });
+  if (!ok) return;
+  setActivity("status.dreaming");
+  try {
+    const result = await postJson("./api/dream/run");
+    await refreshDashboard(
+      "status.dreamed",
+      "success",
+      result.reviewedL1 ?? 0,
+      result.rewrittenProjects ?? 0,
+      result.deletedProjects ?? 0,
+      result.profileUpdated ? 1 : 0,
+      result.duplicateTopicCount ?? 0,
+      result.conflictTopicCount ?? 0,
+    );
+  } catch (error) {
+    try {
+      await refreshDashboard();
+    } catch {}
+    setActivity("status.dreamFailed", "danger", error instanceof Error ? error.message : String(error));
+  }
+}
+
 async function clearMemory() {
   const ok = await showModal({
     icon: "⚠", iconClass: "icon-danger",
@@ -3063,6 +3107,7 @@ levelTabs.addEventListener("click", async (e) => {
 
 refreshBtn.addEventListener("click", () => void refreshDashboard());
 buildNowBtn.addEventListener("click", () => void buildNow());
+dreamRunBtn?.addEventListener("click", () => void dreamRun());
 overviewToggleBtn.addEventListener("click", () => togglePanel("overview"));
 saveSettingsBtn.addEventListener("click", () => void saveSettings());
 if (exportMemoryBtn) exportMemoryBtn.addEventListener("click", () => void exportMemory());
