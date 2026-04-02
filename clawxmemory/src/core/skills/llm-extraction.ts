@@ -96,6 +96,8 @@ interface RawReasoningPayload {
 }
 
 interface RawHop1RoutePayload {
+  query_scope?: unknown;
+  effective_query?: unknown;
   memory_relevant?: unknown;
   base_only?: unknown;
   lookup_queries?: unknown;
@@ -214,6 +216,7 @@ export type LookupTargetType = "time" | "project";
 export interface LlmMemoryRouteInput {
   query: string;
   profile: GlobalProfileRecord | null;
+  recentMessages: MemoryMessage[];
   timeoutMs?: number;
   agentId?: string;
   debugTrace?: PromptDebugSink;
@@ -229,6 +232,8 @@ export interface LookupQuerySpec {
 }
 
 export interface Hop1LookupDecision {
+  queryScope: "standalone" | "continuation";
+  effectiveQuery: string;
   memoryRelevant: boolean;
   baseOnly: boolean;
   lookupQueries: LookupQuerySpec[];
@@ -538,14 +543,24 @@ const HOP1_LOOKUP_SYSTEM_PROMPT = `
 You are the first-hop planner for a memory retrieval system.
 
 Your job is not to choose concrete record ids. Your job is to decide:
-1. whether this question needs dynamic memory,
-2. which index types the next step should search,
-3. which lookup query terms should be used for that search.
+1. whether the current query is standalone or a continuation of the recent conversation,
+2. what the effective self-contained query should be,
+3. whether this question needs dynamic memory,
+4. which index types the next step should search,
+5. which lookup query terms should be used for that search.
 
 Rules:
 - Use semantic meaning, not surface keyword matching.
 - current_local_date is the current local date in YYYY-MM-DD format.
 - global_profile is the top-level stable profile.
+- recent_messages are the most recent cleaned user/assistant turns from the short-term session context.
+- recent_messages are only supporting context for understanding the current query. They are not durable memory evidence.
+- First decide query_scope:
+  - use "continuation" only when the current query clearly depends on recent_messages to resolve omitted topic, entity, or time anchor.
+  - use "standalone" when the current query is already self-contained, or when it clearly starts a new topic and should ignore old context.
+- If query_scope="standalone", effective_query should restate the current query faithfully and should not inherit irrelevant topic details from recent_messages.
+- If query_scope="continuation", effective_query must rewrite the current query into a short self-contained query using only the needed context from recent_messages.
+- effective_query must stay close to the user's intent. Do not add new goals or assumptions.
 - If the question can be answered from global_profile alone, you must set base_only=true.
 - Typical base_only questions include:
   - user identity, preferences, habits, and long-term traits
@@ -577,12 +592,24 @@ Examples:
 - Query: "What was I busy with today?"
   -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time"],"lookup_query":"what I did today","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
 - Query: "How is my paper progressing today?"
-  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time","project"],"lookup_query":"today EMNLP paper progress","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
+  -> query_scope="standalone", effective_query="How is my paper progressing today?", memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time","project"],"lookup_query":"today EMNLP paper progress","time_range":{"start_date":"YYYY-MM-DD","end_date":"YYYY-MM-DD"}}]
 - Query: "Which Beijing barbecue place did you recommend before?"
-  -> memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["project"],"lookup_query":"Beijing barbecue recommendation"}]
+  -> query_scope="standalone", effective_query="Which Beijing barbecue place did you recommend before?", memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["project"],"lookup_query":"Beijing barbecue recommendation"}]
+- recent_messages include:
+    user: "我在西北旺都做了什么"
+    assistant: "你主要在西北旺处理了几个工作点。"
+  Query: "不够详细"
+  -> query_scope="continuation", effective_query="更详细地回忆我在西北旺都做了什么", memory_relevant=true, base_only=false, lookup_queries=[{"target_types":["time","project"],"lookup_query":"西北旺 做了什么 详细回忆"}]
+- recent_messages include:
+    user: "最近在改 retrieval 路由"
+    assistant: "主要在改 Hop1 和 L2 候选构建。"
+  Query: "帮我查一下上海天气"
+  -> query_scope="standalone", effective_query="帮我查一下上海天气", memory_relevant=false, base_only=false, lookup_queries=[]
 
 Use this exact JSON shape:
 {
+  "query_scope": "standalone | continuation",
+  "effective_query": "self-contained query",
   "memory_relevant": true,
   "base_only": false,
   "lookup_queries": [
@@ -934,6 +961,10 @@ function buildHop1RoutePrompt(input: LlmMemoryRouteInput): string {
           text: truncateForPrompt(input.profile.profileText, 140),
         }
       : null,
+    recent_messages: input.recentMessages.map((message) => ({
+      role: message.role,
+      content: truncateForPrompt(message.content, 160),
+    })),
   }, null, 2);
 }
 
@@ -1183,6 +1214,18 @@ function normalizeBoolean(value: unknown, fallback = false): boolean {
     const normalized = value.trim().toLowerCase();
     if (normalized === "true") return true;
     if (normalized === "false") return false;
+  }
+  return fallback;
+}
+
+function normalizeQueryScope(value: unknown): "standalone" | "continuation" {
+  return value === "continuation" ? "continuation" : "standalone";
+}
+
+function normalizeEffectiveQuery(value: unknown, fallback: string): string {
+  if (typeof value === "string") {
+    const normalized = truncateForPrompt(value, 180);
+    if (normalized) return normalized;
   }
   return fallback;
 }
@@ -1814,14 +1857,20 @@ export class LlmMemoryExtractor {
         parse: (raw) => JSON.parse(extractFirstJsonObject(raw)) as RawHop1RoutePayload,
       });
       const baseOnly = normalizeBoolean(parsed.base_only, false);
+      const queryScope = normalizeQueryScope(parsed.query_scope);
+      const effectiveQuery = normalizeEffectiveQuery(parsed.effective_query, defaultQuery);
       return {
+        queryScope,
+        effectiveQuery,
         memoryRelevant: normalizeBoolean(parsed.memory_relevant, true),
         baseOnly,
-        lookupQueries: baseOnly ? [] : normalizeLookupQueries(parsed.lookup_queries, defaultQuery),
+        lookupQueries: baseOnly ? [] : normalizeLookupQueries(parsed.lookup_queries, effectiveQuery),
       };
     } catch (error) {
       this.logger?.warn?.(`[clawxmemory] hop1 lookup fallback: ${String(error)}`);
       return {
+        queryScope: "standalone",
+        effectiveQuery: defaultQuery,
         memoryRelevant: true,
         baseOnly: false,
         lookupQueries: [{

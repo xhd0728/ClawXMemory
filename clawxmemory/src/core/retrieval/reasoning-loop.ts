@@ -6,6 +6,7 @@ import type {
   L1SearchResult,
   L1WindowRecord,
   L2SearchResult,
+  MemoryMessage,
   RetrievalPromptDebug,
   RetrievalTraceDetail,
   RetrievalTrace,
@@ -32,6 +33,7 @@ export interface RetrievalOptions {
   l0Limit?: number;
   includeFacts?: boolean;
   retrievalMode?: "auto" | "explicit";
+  recentMessages?: MemoryMessage[];
 }
 
 export interface RetrievalRuntimeOptions {
@@ -817,7 +819,8 @@ export class ReasoningRetriever {
   }
 
   private buildLocalFallback(
-    query: string,
+    resultQuery: string,
+    fallbackQuery: string,
     candidates: LocalFallbackCandidates,
     execution: RetrieveExecutionOptions,
     elapsedMs: number,
@@ -826,7 +829,7 @@ export class ReasoningRetriever {
   ): RetrievalResult {
     const profile = candidates.profile;
     const l2Results = candidates.l2.slice(0, Math.max(1, Math.min(4, candidates.l2.length || 1)));
-    const evidenceNote = this.buildFallbackEvidenceNote(l2Results, query);
+    const evidenceNote = this.buildFallbackEvidenceNote(l2Results, fallbackQuery);
     const intent = l2Results[0]?.level === "l2_project"
       ? "project"
       : l2Results[0]?.level === "l2_time"
@@ -840,7 +843,7 @@ export class ReasoningRetriever {
         ? "profile"
         : "none";
     return withDebug({
-      query,
+      query: resultQuery,
       intent,
       enoughAt,
       profile,
@@ -976,48 +979,66 @@ export class ReasoningRetriever {
     }
 
     const baseProfile = this.getBaseProfile(options.includeFacts);
+    const recentMessages = Array.isArray(options.recentMessages) ? options.recentMessages.slice(0, 4) : [];
 
     if (execution.retrievalMode === "auto" && this.runtime.isBackgroundBusy?.()) {
       const fallbackCandidates = this.buildLocalFallbackCandidates(query, limits.l2, baseProfile);
-      const fallback = this.buildLocalFallback(query, fallbackCandidates, execution, Date.now() - startedAt, false, ["background_busy", "fallback"]);
+      const fallback = this.buildLocalFallback(query, query, fallbackCandidates, execution, Date.now() - startedAt, false, ["background_busy", "fallback"]);
       appendFallbackStep(trace, ["background_busy", "fallback"], fallback);
       appendContextRenderedStep(trace, fallback);
       return this.finalizeResult(attachTrace(fallback, trace), execution, cacheKey, false);
     }
 
+    let workingQuery = query;
+    let workingLookupQueries: LookupQuerySpec[] = [];
     try {
       const hop1 = await this.extractor.decideMemoryLookup({
         query,
         profile: baseProfile,
+        recentMessages,
         debugTrace: (debug) => {
           hop1PromptDebug = debug;
         },
       });
-      const routedFallbackCandidates = this.buildLocalFallbackCandidates(query, limits.l2, baseProfile, hop1.lookupQueries);
+      const hop1QueryScope = hop1.queryScope === "continuation" ? "continuation" : "standalone";
+      workingQuery = typeof hop1.effectiveQuery === "string" && hop1.effectiveQuery.trim()
+        ? hop1.effectiveQuery.trim()
+        : query;
+      workingLookupQueries = hop1.lookupQueries;
+      const routedFallbackCandidates = this.buildLocalFallbackCandidates(workingQuery, limits.l2, baseProfile, hop1.lookupQueries);
       appendTraceStep(trace, {
         kind: "hop1_decision",
         title: "Hop 1 Decision",
         status: "success",
         inputSummary: baseProfile?.profileText.trim()
-          ? `profile_available=1 · ${previewText(query, 160)}`
-          : previewText(query, 160),
+          ? `profile_available=1 · recent_messages=${recentMessages.length} · ${previewText(query, 160)}`
+          : `recent_messages=${recentMessages.length} · ${previewText(query, 160)}`,
         outputSummary: [
+          `queryScope=${hop1QueryScope}`,
           `memoryRelevant=${hop1.memoryRelevant ? "yes" : "no"}`,
           `baseOnly=${hop1.baseOnly ? "yes" : "no"}`,
           summarizeLookupQueries(hop1.lookupQueries),
         ].join(" · "),
         refs: {
+          queryScope: hop1QueryScope,
+          effectiveQuery: workingQuery,
+          recentMessagesCount: recentMessages.length,
           memoryRelevant: hop1.memoryRelevant,
           baseOnly: hop1.baseOnly,
           lookupQueries: hop1.lookupQueries,
         },
         details: [
           kvDetail("hop1-decision", "Hop 1 Decision", [
+            { label: "queryScope", value: hop1QueryScope },
+            { label: "effectiveQuery", value: workingQuery },
+            { label: "recentMessagesCount", value: recentMessages.length },
             { label: "memoryRelevant", value: hop1.memoryRelevant ? "true" : "false" },
             { label: "baseOnly", value: hop1.baseOnly ? "true" : "false" },
           ]),
           ...(hop1.lookupQueries.length > 0 ? [listDetail("hop1-queries", "Lookup Queries", buildLookupQueryItems(hop1.lookupQueries))] : []),
           jsonDetail("hop1-json", "Hop 1 Structured Result", {
+            queryScope: hop1QueryScope,
+            effectiveQuery: workingQuery,
             memoryRelevant: hop1.memoryRelevant,
             baseOnly: hop1.baseOnly,
             lookupQueries: hop1.lookupQueries,
@@ -1042,6 +1063,8 @@ export class ReasoningRetriever {
           elapsedMs: Date.now() - startedAt,
           cacheHit: false,
           path: execution.retrievalMode,
+          hop1QueryScope,
+          hop1EffectiveQuery: workingQuery,
           hop1BaseOnly: hop1.baseOnly,
           hop1LookupQueries: hop1.lookupQueries.map((entry) => ({
             targetTypes: entry.targetTypes,
@@ -1052,7 +1075,11 @@ export class ReasoningRetriever {
           trace,
           "memory_not_relevant",
           "Hop 1 judged that memory recall is unnecessary for this query.",
-          { hop1BaseOnly: hop1.baseOnly },
+          {
+            hop1QueryScope,
+            hop1EffectiveQuery: workingQuery,
+            hop1BaseOnly: hop1.baseOnly,
+          },
         );
         appendContextRenderedStep(trace, result);
         return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
@@ -1076,6 +1103,8 @@ export class ReasoningRetriever {
           elapsedMs: Date.now() - startedAt,
           cacheHit: false,
           path: execution.retrievalMode,
+          hop1QueryScope,
+          hop1EffectiveQuery: workingQuery,
           hop1BaseOnly: hop1.baseOnly,
           hop1LookupQueries: hop1.lookupQueries.map((entry) => ({
             targetTypes: entry.targetTypes,
@@ -1086,7 +1115,7 @@ export class ReasoningRetriever {
         return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
       }
 
-      const catalog = this.buildL2Catalog(query, hop1.lookupQueries, limits.l2);
+      const catalog = this.buildL2Catalog(workingQuery, hop1.lookupQueries, limits.l2);
       const l2Results = catalog.entries
         .map((entry, index) => {
           const hit = catalog.byId.get(entry.id);
@@ -1117,14 +1146,14 @@ export class ReasoningRetriever {
       });
 
       if (l2Results.length === 0) {
-        const fallback = this.buildLocalFallback(query, routedFallbackCandidates, execution, Date.now() - startedAt, false, ["catalog_empty", "fallback"]);
+        const fallback = this.buildLocalFallback(query, workingQuery, routedFallbackCandidates, execution, Date.now() - startedAt, false, ["catalog_empty", "fallback"]);
         appendFallbackStep(trace, ["catalog_empty", "fallback"], fallback);
         appendContextRenderedStep(trace, fallback);
         return this.finalizeResult(attachTrace(fallback, trace), execution, cacheKey, false);
       }
 
       const hop2 = await this.extractor.selectL2FromCatalog({
-        query,
+        query: workingQuery,
         profile: baseProfile,
         lookupQueries: hop1.lookupQueries,
         l2Entries: catalog.entries,
@@ -1133,7 +1162,7 @@ export class ReasoningRetriever {
           hop2PromptDebug = debug;
         },
       });
-      const hop2Note = hop2.evidenceNote.trim() || this.buildFallbackEvidenceNote(l2Results, query);
+      const hop2Note = hop2.evidenceNote.trim() || this.buildFallbackEvidenceNote(l2Results, workingQuery);
       const shallowMode = this.shouldStayShallow(settings, execution.retrievalMode);
       const hop1DebugQueries = hop1.lookupQueries.map((entry) => ({
         targetTypes: entry.targetTypes,
@@ -1181,6 +1210,8 @@ export class ReasoningRetriever {
           elapsedMs: Date.now() - startedAt,
           cacheHit: false,
           path: execution.retrievalMode,
+          hop1QueryScope,
+          hop1EffectiveQuery: workingQuery,
           hop1BaseOnly: hop1.baseOnly,
           hop1LookupQueries: hop1DebugQueries,
           hop2EnoughAt: hop2.enoughAt,
@@ -1212,6 +1243,8 @@ export class ReasoningRetriever {
           elapsedMs: Date.now() - startedAt,
           cacheHit: false,
           path: execution.retrievalMode,
+          hop1QueryScope,
+          hop1EffectiveQuery: workingQuery,
           hop1BaseOnly: hop1.baseOnly,
           hop1LookupQueries: hop1DebugQueries,
           hop2EnoughAt: hop2.enoughAt,
@@ -1259,6 +1292,8 @@ export class ReasoningRetriever {
           elapsedMs: Date.now() - startedAt,
           cacheHit: false,
           path: execution.retrievalMode,
+          hop1QueryScope,
+          hop1EffectiveQuery: workingQuery,
           hop1BaseOnly: hop1.baseOnly,
           hop1LookupQueries: hop1DebugQueries,
           hop2EnoughAt: hop2.enoughAt,
@@ -1272,7 +1307,7 @@ export class ReasoningRetriever {
       }
 
       const hop3 = await this.extractor.selectL1FromEvidence({
-        query,
+        query: workingQuery,
         evidenceNote: hop2Note,
         selectedL2Entries: catalog.entries,
         l1Windows: l1Candidates,
@@ -1320,6 +1355,8 @@ export class ReasoningRetriever {
           elapsedMs: Date.now() - startedAt,
           cacheHit: false,
           path: execution.retrievalMode,
+          hop1QueryScope,
+          hop1EffectiveQuery: workingQuery,
           hop1BaseOnly: hop1.baseOnly,
           hop1LookupQueries: hop1DebugQueries,
           hop2EnoughAt: hop2.enoughAt,
@@ -1369,6 +1406,8 @@ export class ReasoningRetriever {
           elapsedMs: Date.now() - startedAt,
           cacheHit: false,
           path: execution.retrievalMode,
+          hop1QueryScope,
+          hop1EffectiveQuery: workingQuery,
           hop1BaseOnly: hop1.baseOnly,
           hop1LookupQueries: hop1DebugQueries,
           hop2EnoughAt: hop2.enoughAt,
@@ -1384,7 +1423,7 @@ export class ReasoningRetriever {
       }
 
       const hop4 = await this.extractor.selectL0FromEvidence({
-        query,
+        query: workingQuery,
         evidenceNote: hop3Note,
         selectedL2Entries: catalog.entries,
         selectedL1Windows: l1Candidates,
@@ -1434,6 +1473,8 @@ export class ReasoningRetriever {
         elapsedMs: Date.now() - startedAt,
         cacheHit: false,
         path: execution.retrievalMode,
+        hop1QueryScope,
+        hop1EffectiveQuery: workingQuery,
         hop1BaseOnly: hop1.baseOnly,
         hop1LookupQueries: hop1DebugQueries,
         hop2EnoughAt: hop2.enoughAt,
@@ -1447,8 +1488,8 @@ export class ReasoningRetriever {
       return this.finalizeResult(attachTrace(result, trace), execution, cacheKey, false);
     } catch (error) {
       const timedOut = isTimeoutError(error);
-      const fallbackCandidates = this.buildLocalFallbackCandidates(query, limits.l2, baseProfile);
-      const fallback = this.buildLocalFallback(query, fallbackCandidates, execution, Date.now() - startedAt, false, ["error", "fallback"]);
+      const fallbackCandidates = this.buildLocalFallbackCandidates(workingQuery, limits.l2, baseProfile, workingLookupQueries);
+      const fallback = this.buildLocalFallback(query, workingQuery, fallbackCandidates, execution, Date.now() - startedAt, false, ["error", "fallback"]);
       appendFallbackStep(trace, ["error", "fallback"], fallback);
       appendContextRenderedStep(trace, fallback);
       return this.finalizeResult(attachTrace(fallback, trace), execution, cacheKey, timedOut);

@@ -126,6 +126,8 @@ function createRepository(overrides: Record<string, unknown> = {}) {
 function createExtractor(overrides: Record<string, unknown> = {}) {
   return {
     decideMemoryLookup: vi.fn().mockResolvedValue({
+      queryScope: "standalone",
+      effectiveQuery: "default",
       memoryRelevant: true,
       baseOnly: false,
       lookupQueries: [{ targetTypes: ["time", "project"], lookupQuery: "default", timeRange: null }],
@@ -217,6 +219,59 @@ describe("ReasoningRetriever", () => {
     expect(result.profile?.profileText).toContain("Chinese");
     expect(result.l2Results).toEqual([]);
     expect(result.context).toContain("Global Profile");
+  });
+
+  it("passes recent messages into hop1 and uses effectiveQuery after hop1", async () => {
+    const time = createL2Time({ dateKey: "2026-04-02", summary: "Handled several work items in Xibeiwang." });
+    const repository = createRepository({
+      searchL2TimeIndexes: vi.fn().mockReturnValue([{ level: "l2_time", score: 0.9, item: time }]),
+    });
+    const selectL2FromCatalog = vi.fn().mockResolvedValue({
+      intent: "time",
+      evidenceNote: "Expanded Xibeiwang activity details.",
+      enoughAt: "l2",
+    });
+    const extractor = createExtractor({
+      decideMemoryLookup: vi.fn().mockImplementation(async (input: { recentMessages?: Array<{ role: string; content: string }> }) => {
+        expect(input.recentMessages).toEqual([
+          { role: "user", content: "我在西北旺都做了什么" },
+          { role: "assistant", content: "你主要在西北旺处理了几个工作点。" },
+        ]);
+        return {
+          queryScope: "continuation",
+          effectiveQuery: "更详细地回忆我在西北旺都做了什么",
+          memoryRelevant: true,
+          baseOnly: false,
+          lookupQueries: [{ targetTypes: ["time"], lookupQuery: "西北旺 做了什么", timeRange: null }],
+        };
+      }),
+      selectL2FromCatalog,
+    });
+
+    const retriever = new ReasoningRetriever(
+      repository as never,
+      createSkillsRuntime() as never,
+      extractor as never,
+      { getSettings: () => ({ reasoningMode: "accuracy_first", recallTopK: 10 }) },
+    );
+
+    const result = await retriever.retrieve("不够详细", {
+      retrievalMode: "explicit",
+      recentMessages: [
+        { role: "user", content: "我在西北旺都做了什么" },
+        { role: "assistant", content: "你主要在西北旺处理了几个工作点。" },
+      ],
+    });
+
+    expect(result.query).toBe("不够详细");
+    expect((repository.searchL2TimeIndexes as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith("西北旺 做了什么", 10);
+    expect(selectL2FromCatalog).toHaveBeenCalledWith(expect.objectContaining({
+      query: "更详细地回忆我在西北旺都做了什么",
+    }));
+    expect(result.debug).toMatchObject({
+      hop1QueryScope: "continuation",
+      hop1EffectiveQuery: "更详细地回忆我在西北旺都做了什么",
+    });
   });
 
   it("uses direct date-key reads for time-range retrieval", async () => {

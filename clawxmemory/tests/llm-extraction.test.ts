@@ -58,6 +58,8 @@ describe("LlmMemoryExtractor hop debug trace", () => {
     const debugTrace = vi.fn();
     vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
       .mockResolvedValue(JSON.stringify({
+        query_scope: "continuation",
+        effective_query: "更详细地回忆我对于天津旅游的规划是什么",
         memory_relevant: true,
         base_only: false,
         lookup_queries: [
@@ -72,19 +74,54 @@ describe("LlmMemoryExtractor hop debug trace", () => {
     const result = await extractor.decideMemoryLookup({
       query: "我对于天津旅游的规划是什么",
       profile: createProfile(),
+      recentMessages: [
+        { role: "user", content: "我对于天津旅游的规划是什么" },
+        { role: "assistant", content: "你在推进清明假期天津穷游攻略。" },
+      ],
       debugTrace,
     });
 
+    expect(result.queryScope).toBe("continuation");
+    expect(result.effectiveQuery).toBe("更详细地回忆我对于天津旅游的规划是什么");
     expect(result.lookupQueries[0]?.lookupQuery).toBe("天津旅游规划");
+    const hop1Debug = debugTrace.mock.calls[0]?.[0];
     expect(debugTrace).toHaveBeenCalledWith(expect.objectContaining({
       requestLabel: "Hop1 lookup",
       systemPrompt: expect.stringContaining("first-hop planner"),
-      userPrompt: expect.stringContaining("current_local_date"),
+      userPrompt: expect.any(String),
       rawResponse: expect.stringContaining("lookup_queries"),
       parsedResult: expect.objectContaining({
         base_only: false,
       }),
     }));
+    expect(hop1Debug?.userPrompt).toContain("current_local_date");
+    expect(hop1Debug?.userPrompt).toContain("recent_messages");
+    expect(hop1Debug?.userPrompt).toContain("global_profile");
+  });
+
+  it("falls back to standalone query metadata when hop1 omits new fields", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
+      .mockResolvedValue(JSON.stringify({
+        memory_relevant: true,
+        base_only: false,
+        lookup_queries: [
+          {
+            target_types: ["project"],
+            lookup_query: "天津旅游规划",
+          },
+        ],
+      }));
+
+    const result = await extractor.decideMemoryLookup({
+      query: "我对于天津旅游的规划是什么",
+      profile: createProfile(),
+      recentMessages: [],
+    });
+
+    expect(result.queryScope).toBe("standalone");
+    expect(result.effectiveQuery).toBe("我对于天津旅游的规划是什么");
+    expect(result.lookupQueries[0]?.lookupQuery).toBe("天津旅游规划");
   });
 
   it("emits full prompt debug on successful hop2 parsing with english scaffolding", async () => {

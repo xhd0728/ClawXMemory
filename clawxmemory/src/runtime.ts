@@ -414,6 +414,30 @@ function sanitizeL0Record(
   });
 }
 
+function buildRecentMessagesForRecall(
+  rawMessages: unknown[],
+  currentPrompt: string,
+  config: { includeAssistant: boolean; maxMessageChars: number },
+): MemoryMessage[] {
+  const normalizedPrompt = canonicalizeUserQuery(currentPrompt);
+  const normalized = sanitizeStoredMessages(normalizeMessages(rawMessages, {
+    captureStrategy: "full_session",
+    includeAssistant: config.includeAssistant,
+    maxMessageChars: config.maxMessageChars,
+  }));
+
+  if (normalizedPrompt) {
+    while (normalized.length > 0) {
+      const last = normalized[normalized.length - 1];
+      if (last?.role !== "user") break;
+      if (canonicalizeUserQuery(last.content) !== normalizedPrompt) break;
+      normalized.pop();
+    }
+  }
+
+  return normalized.slice(-4);
+}
+
 function shouldLogStats(stats: HeartbeatStats): boolean {
   return stats.l0Captured > 0
     || stats.l1Created > 0
@@ -1050,12 +1074,19 @@ export class MemoryPluginRuntime {
       const startedAt = Date.now();
       const settings = this.indexer.getSettings();
       const recallTopK = Math.max(1, Math.min(50, settings.recallTopK || 10));
+      const recentMessages = Array.isArray(event.messages)
+        ? buildRecentMessagesForRecall(event.messages, normalizedPrompt, {
+            includeAssistant: this.config.includeAssistant,
+            maxMessageChars: this.config.maxMessageChars,
+          })
+        : [];
       const retrieved = await this.retriever.retrieve(normalizedPrompt, {
         retrievalMode: "auto",
         l2Limit: recallTopK,
         l1Limit: recallTopK,
         l0Limit: recallTopK,
         includeFacts: true,
+        recentMessages,
       });
       const elapsedMs = Date.now() - startedAt;
       const injected = Boolean(retrieved.context?.trim());

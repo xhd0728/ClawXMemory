@@ -207,6 +207,65 @@ describe("MemoryPluginRuntime", () => {
     runtime.stop();
   });
 
+  it("passes cleaned recent messages into retrieval without duplicating the current prompt", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const retrieve = vi.fn().mockResolvedValue({
+      query: "不够详细",
+      intent: "time",
+      enoughAt: "l2",
+      profile: null,
+      evidenceNote: "expanded note",
+      l2Results: [],
+      l1Results: [],
+      l0Results: [],
+      context: "expanded note",
+      debug: {
+        mode: "llm",
+        elapsedMs: 20,
+        cacheHit: false,
+      },
+    });
+    (runtime as { retriever: { retrieve: typeof retrieve } }).retriever = { retrieve };
+
+    await runtime.handleBeforePromptBuild(
+      {
+        prompt: "不够详细",
+        messages: [
+          { role: "user", content: "我在西北旺都做了什么" },
+          { role: "assistant", content: "你主要在西北旺处理了几个工作点。" },
+          { role: "user", content: "不够详细" },
+        ],
+      } as never,
+      { sessionKey: "session-followup" } as never,
+    );
+
+    expect(retrieve).toHaveBeenCalledWith(
+      "不够详细",
+      expect.objectContaining({
+        retrievalMode: "auto",
+        recentMessages: [
+          { role: "user", content: "我在西北旺都做了什么" },
+          { role: "assistant", content: "你主要在西北旺处理了几个工作点。" },
+        ],
+      }),
+    );
+
+    runtime.stop();
+  });
+
   it("records real-turn case traces with retrieval, tool summaries, and final answer", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
     cleanupPaths.push(dir);

@@ -286,6 +286,8 @@ export interface RetrievalResult {
     path?: "auto" | "explicit" | "shadow";
     budgetLimited?: boolean;
     shadowDeepQueued?: boolean;
+    hop1QueryScope?: "standalone" | "continuation";
+    hop1EffectiveQuery?: string;
     hop1BaseOnly?: boolean;
     hop1LookupQueries?: Array<{
       targetTypes: Array<"time" | "project">;
