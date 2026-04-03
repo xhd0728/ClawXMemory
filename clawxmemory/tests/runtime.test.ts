@@ -659,6 +659,79 @@ describe("MemoryPluginRuntime", () => {
     runtime.stop();
   });
 
+  it("normalizes contaminated inbound user turns before case tracing and L0 capture", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const contaminatedUserTurn = [
+      "Project state maintained by ClawXContext.",
+      "Current git branch: main",
+      "Git status summary: clean working tree",
+      "",
+      "我昨天晚上lol手游上宗师了",
+    ].join("\n");
+
+    runtime.handleInternalMessageReceived({
+      type: "message",
+      action: "received",
+      sessionKey: "session-noise-filter",
+      context: {
+        content: contaminatedUserTurn,
+      },
+    } as never);
+
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "user",
+          content: contaminatedUserTurn,
+        },
+      } as never,
+      { sessionKey: "session-noise-filter" } as never,
+    );
+
+    await runtime.handleAgentEnd(
+      {
+        success: true,
+        messages: [
+          { role: "user", content: contaminatedUserTurn },
+          { role: "assistant", content: "这确实值得记下来，后面再复盘你的上分节奏。" },
+        ],
+      } as never,
+      { sessionKey: "session-noise-filter" } as never,
+    );
+
+    const records = (runtime as never as {
+      listRecentCaseTraces: (limit: number) => Array<Record<string, unknown>>;
+    }).listRecentCaseTraces(10);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      query: "我昨天晚上lol手游上宗师了",
+    });
+    expect(runtime.repository.listRecentL0(10)).toMatchObject([
+      {
+        sessionKey: "session-noise-filter",
+        messages: [
+          { role: "user", content: "我昨天晚上lol手游上宗师了" },
+          { role: "assistant", content: "这确实值得记下来，后面再复盘你的上分节奏。" },
+        ],
+      },
+    ]);
+
+    runtime.stop();
+  });
+
   it("sanitizes recall scaffolding when agent_end falls back to raw event messages", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
     cleanupPaths.push(dir);
@@ -710,6 +783,51 @@ describe("MemoryPluginRuntime", () => {
     expect(record?.messages).toEqual([
       { role: "user", content: "感觉冒菜可以" },
       { role: "assistant", content: "胃菜不错！热乎又管饱。" },
+    ]);
+
+    runtime.stop();
+  });
+
+  it("drops assistant-only plugin status scaffolding during agent_end fallback capture", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    await runtime.handleAgentEnd(
+      {
+        messages: [
+          {
+            role: "user",
+            content: "帮我记一下我昨晚上 lol 手游上宗师了",
+          },
+          {
+            role: "assistant",
+            content: [
+              "Project state maintained by ClawXContext.",
+              "Current git branch: main",
+              "Git status summary: clean working tree",
+            ].join("\n"),
+          },
+        ],
+      } as never,
+      {
+        sessionKey: "session-status-only-assistant",
+      } as never,
+    );
+
+    const record = runtime.repository.listRecentL0(1)[0];
+    expect(record?.messages).toEqual([
+      { role: "user", content: "帮我记一下我昨晚上 lol 手游上宗师了" },
     ]);
 
     runtime.stop();
@@ -916,6 +1034,10 @@ describe("MemoryPluginRuntime", () => {
         {
           role: "user",
           content: [
+            "Project state maintained by ClawXContext.",
+            "Current git branch: main",
+            "Git status summary: clean working tree",
+            "",
             "## ClawXMemory Recall",
             "",
             "Use the following retrieved ClawXMemory evidence for this turn.",
@@ -957,6 +1079,63 @@ describe("MemoryPluginRuntime", () => {
         { role: "assistant", content: "胃菜不错！热乎又管饱。" },
       ]);
       expect(record?.indexed).toBe(false);
+      expect(runHeartbeat).toHaveBeenCalledWith({ reason: "repair" });
+    });
+
+    runtime.stop();
+  });
+
+  it("removes historical l0 rows that only contain plugin state scaffolding during startup repair", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    runtime.repository.insertL0Session({
+      l0IndexId: "l0-plugin-noise-only",
+      sessionKey: "session-noise-only",
+      timestamp: "2026-04-03T04:19:44.000Z",
+      source: "openclaw",
+      indexed: true,
+      createdAt: "2026-04-03T04:19:44.000Z",
+      messages: [
+        {
+          role: "user",
+          content: [
+            "Project state maintained by ClawXContext.",
+            "Current git branch: main",
+            "Git status summary: clean working tree",
+          ].join("\n"),
+        },
+        {
+          role: "assistant",
+          content: "📊 **Session Status** - **Agent:** main - **Host:** Ms's MacBook Air - **Workspace:** /Users/meisen/openclaw/workspace - **OS:** Darwin 25.4.0 - **Node:** v22.18.0",
+        },
+      ],
+    });
+
+    const runHeartbeat = vi.spyOn(runtime.indexer, "runHeartbeat").mockResolvedValue({
+      l0Captured: 0,
+      l1Created: 0,
+      l2TimeUpdated: 0,
+      l2ProjectUpdated: 0,
+      profileUpdated: 0,
+      failed: 0,
+    });
+
+    runtime.start();
+
+    await vi.waitFor(() => {
+      expect(runtime.repository.listRecentL0(10)).toEqual([]);
       expect(runHeartbeat).toHaveBeenCalledWith({ reason: "repair" });
     });
 

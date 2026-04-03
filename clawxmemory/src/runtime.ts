@@ -44,7 +44,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-const MEMORY_REPAIR_VERSION = "2026-03-24-recall-injection-cleanup-v15";
+const MEMORY_REPAIR_VERSION = "2026-04-03-strict-user-io-cleanup-v16";
 const INDEXING_SETTINGS_MIGRATION_VERSION = "2026-04-02-auto-dream-settings-v3";
 const PLUGIN_ID = "openbmb-clawxmemory";
 const NATIVE_MEMORY_PLUGIN_ID = "memory-core";
@@ -267,11 +267,6 @@ function shouldSkipCapture(event: Record<string, unknown>, ctx: Record<string, u
 
 function isControlCommandText(text: string): boolean {
   return isCommandOnlyUserText(text);
-}
-
-function truncateMessageText(text: string, maxMessageChars: number): string {
-  if (text.length <= maxMessageChars) return text;
-  return `${text.slice(0, maxMessageChars)}...`;
 }
 
 function previewText(text: string, maxChars = 280): string {
@@ -1060,14 +1055,19 @@ export class MemoryPluginRuntime {
     if (!rawContent || isControlCommandText(rawContent) || isSessionStartupMarkerText(rawContent)) return;
 
     const sessionKey = this.getEffectiveSessionKey(rawSessionKey);
-    const normalized: MemoryMessage = {
-      role: "user",
-      content: truncateMessageText(rawContent, this.config.maxMessageChars),
-    };
     const rawMessageId = typeof context?.messageId === "string" ? context.messageId.trim() : "";
-    if (rawMessageId) {
-      normalized.msgId = rawMessageId;
-    }
+    const normalized = normalizeTranscriptMessage(
+      {
+        role: "user",
+        content: rawContent,
+        ...(rawMessageId ? { id: rawMessageId } : {}),
+      },
+      {
+        includeAssistant: this.config.includeAssistant,
+        maxMessageChars: this.config.maxMessageChars,
+      },
+    );
+    if (!normalized || normalized.role !== "user") return;
 
     this.appendPendingMessage(sessionKey, normalized);
     this.markRecentInbound(sessionKey);

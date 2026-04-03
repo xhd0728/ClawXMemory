@@ -55,6 +55,24 @@ const KNOWN_SLASH_COMMANDS = new Set([
   "compact",
 ]);
 const KNOWN_BANG_COMMANDS = new Set(["poll", "stop"]);
+const PLUGIN_STATE_LINE_PATTERNS = [
+  /^project state maintained by\b/i,
+  /^session status\b/i,
+  /^current git branch\s*:/i,
+  /^git status(?: summary)?\s*:/i,
+] as const;
+const PLUGIN_STATE_METADATA_PATTERNS = [
+  /\bproject state maintained by\b/i,
+  /\bsession status\b/i,
+  /\bagent\s*:/i,
+  /\bhost\s*:/i,
+  /\bworkspace\s*:/i,
+  /\bos\s*:/i,
+  /\bnode\s*:/i,
+  /\bmodel\s*:/i,
+  /\bcurrent git branch\s*:/i,
+  /\bgit status(?: summary)?\s*:/i,
+] as const;
 
 export interface TranscriptMessageInfo {
   role: "user" | "assistant" | undefined;
@@ -92,7 +110,10 @@ function extractTextFromObject(content: Record<string, unknown>, depth: number):
   }
 
   const parts: string[] = [];
-  const prioritizedKeys = ["text", "body", "message", "content", "caption", "prompt", "value"];
+  if (typeof content.text === "string") {
+    pushUniqueText(parts, content.text);
+  }
+  const prioritizedKeys = ["content", "body", "message", "caption"];
   const listKeys = ["parts", "items", "blocks", "segments", "chunks"];
 
   for (const key of prioritizedKeys) {
@@ -175,6 +196,76 @@ function compactWhitespace(text: string): string {
     previousEmpty = empty;
   }
   return compact.join("\n").trim();
+}
+
+function normalizePluginNoiseProbe(text: string): string {
+  return text
+    .replace(/\r/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .replace(/^[>\-*\s]+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function countPluginStateMarkers(text: string): number {
+  const normalized = normalizePluginNoiseProbe(text);
+  let count = 0;
+  for (const pattern of PLUGIN_STATE_METADATA_PATTERNS) {
+    if (pattern.test(normalized)) count += 1;
+  }
+  return count;
+}
+
+function startsWithPluginStateLine(text: string): boolean {
+  const normalized = normalizePluginNoiseProbe(text);
+  return PLUGIN_STATE_LINE_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function lineLooksLikePluginNoise(text: string): boolean {
+  const normalized = normalizePluginNoiseProbe(text);
+  if (!normalized) return false;
+  return startsWithPluginStateLine(normalized) || countPluginStateMarkers(normalized) >= 4;
+}
+
+function paragraphLooksLikePluginNoise(text: string): boolean {
+  const normalized = normalizePluginNoiseProbe(text);
+  if (!normalized) return false;
+  if (startsWithPluginStateLine(normalized)) return true;
+
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => normalizePluginNoiseProbe(line))
+    .filter(Boolean);
+  const noisyLines = lines.filter((line) => startsWithPluginStateLine(line) || countPluginStateMarkers(line) >= 3).length;
+  const markerCount = countPluginStateMarkers(normalized);
+  if (/session status/i.test(normalized) && markerCount >= 2) return true;
+  return markerCount >= 4 && noisyLines >= Math.max(1, Math.ceil(lines.length / 2));
+}
+
+function stripPluginStateScaffolding(text: string): string {
+  const normalized = compactWhitespace(text);
+  if (!normalized) return "";
+
+  const paragraphs = normalized
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  while (paragraphs.length > 0 && paragraphLooksLikePluginNoise(paragraphs[0]!)) {
+    paragraphs.shift();
+  }
+
+  let cleaned = paragraphs.join("\n\n").trim();
+  if (!cleaned) return "";
+
+  const lines = cleaned.split("\n");
+  while (lines.length > 0 && lineLooksLikePluginNoise(lines[0]!)) {
+    lines.shift();
+  }
+  cleaned = compactWhitespace(lines.join("\n"));
+  if (!cleaned) return "";
+  return paragraphLooksLikePluginNoise(cleaned) ? "" : cleaned;
 }
 
 function normalizeSenderHint(value: string): string {
@@ -301,6 +392,7 @@ function stripLeadingMessageEnvelopeLines(text: string): string {
     if (value === "{" || value === "}") return true;
     if (/^(?:Conversation info|Sender)\s*\(untrusted metadata\)\s*:?/i.test(value)) return true;
     if (/^(?:Chat history since last reply|Replied message)\s*\(untrusted[^)]*\)\s*:?/i.test(value)) return true;
+    if (/^System:\s*\[[^\]\n]*(?:\d{4}-\d{1,2}-\d{1,2}|GMT|UTC)[^\]\n]*\]\s*/i.test(value)) return true;
     if (/^\[message_id:[^\]]+\]$/i.test(value)) return true;
     if (/^\[[^\]\n]*(?:for context|Current message - respond to this)[^\]\n]*\]$/i.test(value)) return true;
     if (/^\[[^\]\n]*(?:\d{4}-\d{1,2}-\d{1,2}|GMT|UTC|channel:\d+)[^\]\n]*\]\s*[^:\n]{1,120}:\s*/i.test(value)) return true;
@@ -327,6 +419,9 @@ function stripUserNoise(text: string): string {
   cleaned = stripLeadingMessageEnvelopeLines(cleaned);
   cleaned = stripLeadingSenderPrefix(cleaned, senderHints);
   cleaned = stripLeadingMentions(cleaned);
+  cleaned = stripPluginStateScaffolding(cleaned);
+  cleaned = stripLeadingMessageEnvelopeLines(cleaned);
+  cleaned = stripLeadingTimestampPrefix(cleaned);
   return compactWhitespace(cleaned);
 }
 
@@ -364,11 +459,11 @@ function stripAssistantThinking(text: string): string {
       || (/^这搜索/.test(first) && /不太全|看不到|找不到/.test(first))
     );
     if (looksLikeMetaReasoning) {
-      return paragraphs.slice(1).join("\n\n").trim();
+      return stripPluginStateScaffolding(paragraphs.slice(1).join("\n\n").trim());
     }
   }
 
-  return normalized;
+  return stripPluginStateScaffolding(normalized);
 }
 
 function hasToolCallContent(content: unknown): boolean {
