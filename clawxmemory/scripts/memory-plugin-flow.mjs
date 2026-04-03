@@ -220,6 +220,25 @@ export function shouldRetryUnsafeLinkInstall(rawOutput) {
   return normalized.includes(OPENCLAW_UNSAFE_INSTALL_BLOCKED_TEXT);
 }
 
+export function shouldContinueWithConfigManagedLoadPath({ trackedInstall, loadPathConfiguredAfterInstall, rawOutput }) {
+  if (trackedInstall || loadPathConfiguredAfterInstall) {
+    return {
+      continueWithLoadPath: true,
+      reason: trackedInstall ? "tracked_install" : "configured_load_path",
+    };
+  }
+  if (shouldRetryUnsafeLinkInstall(rawOutput)) {
+    return {
+      continueWithLoadPath: true,
+      reason: "unsafe_install_blocked",
+    };
+  }
+  return {
+    continueWithLoadPath: false,
+    reason: "install_failed",
+  };
+}
+
 function parseJsonFromMixedOutput(raw) {
   const text = String(raw || "").trim();
   if (!text) return null;
@@ -950,12 +969,27 @@ async function ensureLinkedPluginInstall(repoRoot, pluginPath, { forceInstall = 
   const tracked = await hasTrackedPluginInstall();
   const loadPathConfiguredAfterInstall = await hasConfiguredPluginLoadPath(pluginPath);
   if (!tracked) {
-    if (loadPathConfiguredAfterInstall) {
+    const fallbackDecision = shouldContinueWithConfigManagedLoadPath({
+      trackedInstall: tracked,
+      loadPathConfiguredAfterInstall,
+      rawOutput: installOutput,
+    });
+    if (fallbackDecision.continueWithLoadPath) {
       if (result.timedOut) {
         printWarn(`${installCommand} timed out`, "continuing with load-path based linking");
       } else if (result.code !== 0) {
         const snippet = summarizeOutput(installOutput, 1200);
-        printWarn(`${installCommand} exited non-zero`, snippet || `exit=${result.code}`);
+        if (fallbackDecision.reason === "unsafe_install_blocked") {
+          printWarn(
+            `${installCommand} remained blocked by the OpenClaw scanner`,
+            "continuing with config-managed load-path linking for this local development plugin",
+          );
+          if (snippet) {
+            printInfo("Plugin install diagnostics", snippet);
+          }
+        } else {
+          printWarn(`${installCommand} exited non-zero`, snippet || `exit=${result.code}`);
+        }
       } else {
         printWarn("Plugin install metadata missing", "continuing with load-path based linking");
       }

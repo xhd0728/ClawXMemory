@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluatePluginVerification,
   parseClawxmemoryRuntimeSignals,
+  shouldContinueWithConfigManagedLoadPath,
   shouldRetryUnsafeLinkInstall,
   shouldSkipPluginInstall,
 } from "../scripts/memory-plugin-flow.mjs";
@@ -93,5 +94,16 @@ describe("memory-plugin-flow", () => {
       "Plugin \"openbmb-clawxmemory\" installation blocked: dangerous code patterns detected: Shell command execution detected (child_process).",
     )).toBe(true);
     expect(shouldRetryUnsafeLinkInstall("plugin install failed: ENOENT")).toBe(false);
+  });
+
+  it("continues with config-managed load paths when a clean relink is blocked by the unsafe-install scanner", () => {
+    expect(shouldContinueWithConfigManagedLoadPath({
+      trackedInstall: false,
+      loadPathConfiguredAfterInstall: false,
+      rawOutput: "Plugin \"openbmb-clawxmemory\" installation blocked: dangerous code patterns detected",
+    })).toEqual({
+      continueWithLoadPath: true,
+      reason: "unsafe_install_blocked",
+    });
   });
 });
