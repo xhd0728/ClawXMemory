@@ -43,6 +43,8 @@ const LOCALES = {
     "settings.scheduleHint": "0 表示关闭自动任务",
     "settings.autoDreamHint": "只有新增 L1 达到门槛时，自动 Dream 才会真正执行。",
     "settings.off": "已关闭",
+    "settings.advanced": "高级参数",
+    "settings.dataManagement": "数据管理",
     "settings.save": "保存设置",
     "settings.theme": "主题",
     "settings.theme.light": "浅色",
@@ -323,6 +325,8 @@ const LOCALES = {
     "settings.scheduleHint": "0 disables the automatic job",
     "settings.autoDreamHint": "Automatic Dream only runs when new L1 windows reach the configured threshold.",
     "settings.off": "Off",
+    "settings.advanced": "Advanced",
+    "settings.dataManagement": "Data",
     "settings.save": "Save",
     "settings.theme": "Theme",
     "settings.theme.light": "Light",
@@ -798,6 +802,7 @@ const state = {
   connL1Ids: [],
   connL0Map: {},
 };
+let settingsSaveRequestId = 0;
 
 /* ── Helpers ──────────────────────────────────────────────── */
 
@@ -1210,6 +1215,34 @@ function applySettings(settings = {}) {
     );
   }
   updateSettingsVisibility();
+}
+
+function buildSettingsSummary(settings) {
+  const modeLabel = t(`reasoning.${settings.reasoningMode || "answer_first"}`);
+  return `${modeLabel} · topK=${settings.recallTopK ?? 10} · index=${formatScheduleHours(settings.autoIndexIntervalMinutes)} · dream=${formatScheduleHours(settings.autoDreamIntervalMinutes)} / L1>=${settings.autoDreamMinNewL1 ?? 10}`;
+}
+
+function syncSavedSettings(settings, options = {}) {
+  const { syncForm = true } = options;
+  if (syncForm) {
+    applySettings(settings);
+  } else {
+    state.settings = {
+      ...state.settings,
+      ...(settings || {}),
+    };
+    const activeMode = state.settings.reasoningMode || "answer_first";
+    if (reasoningModeToggle) {
+      reasoningModeToggle.querySelectorAll(".popover-seg-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.mode === activeMode);
+      });
+    }
+    updateSettingsVisibility();
+  }
+  renderOverview({
+    ...state.overview,
+    currentReasoningMode: settings.reasoningMode || state.settings.reasoningMode || "answer_first",
+  });
 }
 
 function readSettingsForm() {
@@ -3036,12 +3069,47 @@ async function loadCases(options = {}) {
 /* ── Actions ─────────────────────────────────────────────── */
 
 async function saveSettings() {
+  const requestId = ++settingsSaveRequestId;
   const payload = readSettingsForm();
   const settings = await postJson("./api/settings", payload);
-  applySettings(settings);
-  const modeLabel = t(`reasoning.${settings.reasoningMode || "answer_first"}`);
-  const summary = `${modeLabel} · topK=${settings.recallTopK ?? 10} · index=${formatScheduleHours(settings.autoIndexIntervalMinutes)} · dream=${formatScheduleHours(settings.autoDreamIntervalMinutes)} / L1>=${settings.autoDreamMinNewL1 ?? 10}`;
+  if (requestId !== settingsSaveRequestId) return;
+  syncSavedSettings(settings, { syncForm: true });
+  const summary = buildSettingsSummary(settings);
   setActivity("status.settingsSaved", "success", summary);
+}
+
+async function saveReasoningMode(mode) {
+  const nextMode = mode === "accuracy_first" ? "accuracy_first" : "answer_first";
+  const previousMode = state.settings.reasoningMode || "answer_first";
+  if (nextMode === previousMode) return;
+
+  state.settings = {
+    ...state.settings,
+    reasoningMode: nextMode,
+  };
+  renderOverview({
+    ...state.overview,
+    currentReasoningMode: nextMode,
+  });
+
+  const requestId = ++settingsSaveRequestId;
+  try {
+    const settings = await postJson("./api/settings", { reasoningMode: nextMode });
+    if (requestId !== settingsSaveRequestId) return;
+    syncSavedSettings(settings, { syncForm: false });
+    setActivity("status.settingsSaved", "success", buildSettingsSummary(settings));
+  } catch (error) {
+    if (requestId !== settingsSaveRequestId) return;
+    state.settings = {
+      ...state.settings,
+      reasoningMode: previousMode,
+    };
+    renderOverview({
+      ...state.overview,
+      currentReasoningMode: previousMode,
+    });
+    setActivity("status.loadFail", "danger", error instanceof Error ? error.message : String(error));
+  }
 }
 
 function showModal({ icon, iconClass, title, body, confirmText, cancelText, confirmClass }) {
@@ -3251,6 +3319,18 @@ if (listClearBtn) listClearBtn.addEventListener("click", () => {
 const settingsPopover = document.getElementById("settingsPopover");
 const navMenuTrigger = document.getElementById("navMenuTrigger");
 
+function initSectionToggles() {
+  settingsPopover?.querySelectorAll(".popover-section-toggle").forEach((toggle) => {
+    const body = toggle.nextElementSibling;
+    if (!body || !body.classList.contains("popover-section-body")) return;
+    toggle.addEventListener("click", () => {
+      const isOpen = toggle.classList.toggle("open");
+      body.classList.toggle("open", isOpen);
+    });
+  });
+}
+initSectionToggles();
+
 function closePopover() { settingsPopover?.classList.remove("open"); }
 
 function positionPopover() {
@@ -3287,9 +3367,12 @@ if (detailToggleBtn) detailToggleBtn.addEventListener("click", () => togglePanel
 if (reasoningModeToggle) reasoningModeToggle.addEventListener("click", (e) => {
   const btn = e.target instanceof Element ? e.target.closest("[data-mode]") : null;
   if (!btn) return;
+  const mode = btn.dataset.mode === "accuracy_first" ? "accuracy_first" : "answer_first";
+  if ((state.settings.reasoningMode || "answer_first") === mode) return;
   reasoningModeToggle.querySelectorAll(".popover-seg-btn").forEach((b) => b.classList.remove("active"));
   btn.classList.add("active");
   updateSettingsVisibility();
+  void saveReasoningMode(mode);
 });
 overviewCloseBtn.addEventListener("click", () => setPanel(null));
 if (settingsCloseBtn) settingsCloseBtn.addEventListener("click", () => setPanel(null));
