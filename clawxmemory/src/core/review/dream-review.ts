@@ -21,6 +21,7 @@ type LoggerLike = {
 
 interface DreamReviewRunnerOptions {
   logger?: LoggerLike;
+  getDreamProjectRebuildTimeoutMs?: () => number;
 }
 
 interface DreamEvidencePack {
@@ -726,6 +727,9 @@ export class DreamRewriteRunner {
       l1Windows: evidence.allL1Windows,
       l0Sessions: evidence.l0Previews,
       clusters: evidence.projectClusters,
+      ...(this.options.getDreamProjectRebuildTimeoutMs
+        ? { timeoutMs: this.options.getDreamProjectRebuildTimeoutMs() }
+        : {}),
     });
     if (planned.projects.length === 0) {
       throw new Error("Dream project rebuild returned no valid projects.");

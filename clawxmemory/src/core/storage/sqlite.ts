@@ -422,6 +422,14 @@ function normalizeIndexingSettings(
   defaults: IndexingSettings,
 ): IndexingSettings {
   const legacy = input as Record<string, unknown> | undefined;
+  const resolveNonNegativeIntOrDefault = (value: unknown, fallback: number): number => {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) return Math.floor(value);
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+    }
+    return fallback;
+  };
   const reasoningMode = input?.reasoningMode === "accuracy_first" ? "accuracy_first" : "answer_first";
   const rawTopK = typeof input?.recallTopK === "number" && Number.isFinite(input.recallTopK)
     ? input.recallTopK
@@ -458,12 +466,18 @@ function normalizeIndexingSettings(
       : typeof legacy?.autoDreamMinNewL1 === "string" && legacy.autoDreamMinNewL1.trim()
         ? Number.parseInt(legacy.autoDreamMinNewL1, 10)
         : defaults.autoDreamMinNewL1;
+  const rawDreamProjectRebuildTimeoutMs = input?.dreamProjectRebuildTimeoutMs;
   return {
     reasoningMode,
     recallTopK: Math.max(1, Math.min(50, Math.floor(rawTopK))),
     autoIndexIntervalMinutes: Math.max(0, Math.floor(rawAutoIndexIntervalMinutes)),
     autoDreamIntervalMinutes: Math.max(0, Math.floor(rawAutoDreamIntervalMinutes)),
     autoDreamMinNewL1: Math.max(0, Math.floor(rawAutoDreamMinNewL1)),
+    dreamProjectRebuildTimeoutMs: resolveNonNegativeIntOrDefault(
+      rawDreamProjectRebuildTimeoutMs
+        ?? legacy?.dreamProjectRebuildTimeoutMs,
+      defaults.dreamProjectRebuildTimeoutMs,
+    ),
   };
 }
 
@@ -1811,6 +1825,7 @@ export class MemoryRepository {
         autoIndexIntervalMinutes: 60,
         autoDreamIntervalMinutes: 360,
         autoDreamMinNewL1: 10,
+        dreamProjectRebuildTimeoutMs: 180_000,
       }),
       recentTimeIndexes: this.listRecentL2Time(limit),
       recentProjectIndexes: this.listRecentL2Projects(limit),

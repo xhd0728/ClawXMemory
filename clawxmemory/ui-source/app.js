@@ -38,6 +38,8 @@ const LOCALES = {
     "settings.autoIndexInterval": "自动索引间隔（小时）",
     "settings.autoDreamInterval": "自动 Dream 间隔（小时）",
     "settings.autoDreamMinL1": "自动 Dream 最小新增 L1",
+    "settings.dreamRebuildTimeout": "Dream 重构超时（秒）",
+    "settings.dreamRebuildTimeoutHint": "默认 180 秒；0 表示不设超时。该设置同时作用于手动 Dream 和自动 Dream。",
     "settings.scheduleHint": "0 表示关闭自动任务",
     "settings.autoDreamHint": "只有新增 L1 达到门槛时，自动 Dream 才会真正执行。",
     "settings.off": "已关闭",
@@ -316,6 +318,8 @@ const LOCALES = {
     "settings.autoIndexInterval": "Auto index interval (hours)",
     "settings.autoDreamInterval": "Auto Dream interval (hours)",
     "settings.autoDreamMinL1": "Auto Dream min new L1",
+    "settings.dreamRebuildTimeout": "Dream rebuild timeout (seconds)",
+    "settings.dreamRebuildTimeoutHint": "Default 180 seconds. Set 0 to disable the timeout for both manual and automatic Dream runs.",
     "settings.scheduleHint": "0 disables the automatic job",
     "settings.autoDreamHint": "Automatic Dream only runs when new L1 windows reach the configured threshold.",
     "settings.off": "Off",
@@ -688,6 +692,7 @@ const maxAutoReplyLatencyInput = $("#maxAutoReplyLatencyInput");
 const autoIndexIntervalHoursInput = $("#autoIndexIntervalHoursInput");
 const autoDreamIntervalHoursInput = $("#autoDreamIntervalHoursInput");
 const autoDreamMinL1Input = $("#autoDreamMinL1Input");
+const dreamRebuildTimeoutSecondsInput = $("#dreamRebuildTimeoutSecondsInput");
 const latencyFieldWrap = $("#latencyFieldWrap");
 const langToggle = document.getElementById("langToggle");
 
@@ -761,6 +766,7 @@ const state = {
     autoIndexIntervalMinutes: 60,
     autoDreamIntervalMinutes: 360,
     autoDreamMinNewL1: 10,
+    dreamProjectRebuildTimeoutMs: 180000,
   },
   globalProfile: { recordId: "global_profile_record", profileText: "", sourceL1Ids: [], createdAt: "", updatedAt: "" },
   baseRaw: { l2_time: [], l2_project: [], l1: [], l0: [], profile: [] },
@@ -1151,6 +1157,18 @@ function parseHoursToMinutes(value, fallbackMinutes) {
   return Math.max(0, Math.round(parsed * 60));
 }
 
+function millisecondsToSecondsValue(value, fallbackSeconds) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(fallbackSeconds);
+  return String(Math.max(0, Math.round(numeric / 1000)));
+}
+
+function parseSecondsToMilliseconds(value, fallbackMs) {
+  const parsed = Number.parseFloat(String(value || "").trim());
+  if (!Number.isFinite(parsed)) return fallbackMs;
+  return Math.max(0, Math.round(parsed * 1000));
+}
+
 function formatScheduleHours(minutes) {
   const numeric = Number(minutes);
   if (!Number.isFinite(numeric) || numeric <= 0) return t("settings.off");
@@ -1166,6 +1184,7 @@ function applySettings(settings = {}) {
     autoIndexIntervalMinutes: 60,
     autoDreamIntervalMinutes: 360,
     autoDreamMinNewL1: 10,
+    dreamProjectRebuildTimeoutMs: 180000,
     ...(settings || {}),
   };
   const activeMode = state.settings.reasoningMode || "answer_first";
@@ -1183,6 +1202,12 @@ function applySettings(settings = {}) {
   }
   if (autoDreamMinL1Input) {
     autoDreamMinL1Input.value = String(Math.max(0, Number(state.settings.autoDreamMinNewL1 ?? 10)));
+  }
+  if (dreamRebuildTimeoutSecondsInput) {
+    dreamRebuildTimeoutSecondsInput.value = millisecondsToSecondsValue(
+      state.settings.dreamProjectRebuildTimeoutMs,
+      180,
+    );
   }
   updateSettingsVisibility();
 }
@@ -1202,6 +1227,10 @@ function readSettingsForm() {
     autoDreamMinNewL1: Number.isFinite(parsedDreamMinL1)
       ? Math.max(0, parsedDreamMinL1)
       : state.settings.autoDreamMinNewL1,
+    dreamProjectRebuildTimeoutMs: parseSecondsToMilliseconds(
+      dreamRebuildTimeoutSecondsInput?.value,
+      state.settings.dreamProjectRebuildTimeoutMs ?? 180000,
+    ),
   };
 }
 

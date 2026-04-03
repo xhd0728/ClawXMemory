@@ -16,6 +16,7 @@ function createSettings(overrides: Record<string, unknown> = {}) {
     autoIndexIntervalMinutes: 60,
     autoDreamIntervalMinutes: 360,
     autoDreamMinNewL1: 10,
+    dreamProjectRebuildTimeoutMs: 180_000,
     ...overrides,
   };
 }

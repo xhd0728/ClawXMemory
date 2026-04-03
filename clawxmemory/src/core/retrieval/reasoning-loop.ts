@@ -534,6 +534,7 @@ export class ReasoningRetriever {
       autoIndexIntervalMinutes: 60,
       autoDreamIntervalMinutes: 360,
       autoDreamMinNewL1: 10,
+      dreamProjectRebuildTimeoutMs: 180_000,
     };
   }
 

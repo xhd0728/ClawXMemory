@@ -254,6 +254,50 @@ describe("DreamRewriteRunner", () => {
     });
   });
 
+  it("passes the configured Dream rebuild timeout into project planning", async () => {
+    const applyDreamRewrite = vi.fn();
+    const extractor = {
+      planDreamProjectRebuild: vi.fn().mockResolvedValue({
+        summary: "Merged duplicate Dream project summaries into one canonical project.",
+        duplicateTopicCount: 0,
+        conflictTopicCount: 0,
+        projects: [
+          {
+            projectKey: "dream-review",
+            projectName: "Dream Review",
+            currentStatus: "in_progress",
+            summary: "Dream now rebuilds L2 project memory from validated L1 windows.",
+            latestProgress: "Exact L1 references were pruned for the rebuilt project.",
+            retainedL1Ids: ["l1-2"],
+          },
+        ],
+        deletedProjectKeys: [],
+        l1Issues: [],
+      }),
+      rewriteDreamGlobalProfile: vi.fn().mockResolvedValue({
+        profileText: "用户偏好用中文做规划，并且会迭代式地整理 memory 架构。",
+        sourceL1Ids: ["l1-1", "l1-2"],
+        conflictWithExisting: false,
+      }),
+    } as never;
+
+    const runner = new DreamRewriteRunner({
+      listAllL1: () => [createL1(), createSecondL1()],
+      listAllL2Projects: () => [createProject()],
+      getGlobalProfileRecord: () => createProfile(),
+      getL0ByL1Ids: () => [createL0()],
+      applyDreamRewrite,
+    }, extractor, {
+      getDreamProjectRebuildTimeoutMs: () => 42_000,
+    });
+
+    await runner.run();
+
+    expect(extractor.planDreamProjectRebuild).toHaveBeenCalledWith(expect.objectContaining({
+      timeoutMs: 42_000,
+    }));
+  });
+
   it("fails closed when project rebuild planning fails", async () => {
     const applyDreamRewrite = vi.fn();
     const extractor = {

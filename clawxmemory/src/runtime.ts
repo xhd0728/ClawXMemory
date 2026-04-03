@@ -609,7 +609,10 @@ export class MemoryPluginRuntime {
         isBackgroundBusy: () => this.indexingInProgress,
       },
     );
-    this.dreamRewriter = new DreamRewriteRunner(this.repository, extractor, { logger: this.logger });
+    this.dreamRewriter = new DreamRewriteRunner(this.repository, extractor, {
+      logger: this.logger,
+      getDreamProjectRebuildTimeoutMs: () => this.indexer.getSettings().dreamProjectRebuildTimeoutMs,
+    });
 
     if (this.config.uiEnabled) {
       this.uiServer = new LocalUiServer(

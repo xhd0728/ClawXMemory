@@ -132,6 +132,8 @@ interface RawDreamProjectPlanPayload {
   l1_issues?: unknown;
 }
 
+const DEFAULT_DREAM_PROJECT_REBUILD_TIMEOUT_MS = 180_000;
+
 interface RawDreamGlobalProfileRewritePayload {
   profile_text?: unknown;
   source_l1_ids?: unknown;
@@ -258,6 +260,7 @@ export interface LlmDreamProjectRebuildInput {
   l0Sessions: L0SessionRecord[];
   clusters: LlmDreamProjectClusterInput[];
   agentId?: string;
+  timeoutMs?: number;
 }
 
 export interface LlmDreamL1Issue {
@@ -2521,7 +2524,7 @@ export class LlmMemoryExtractor {
       systemPrompt: DREAM_PROJECT_REBUILD_SYSTEM_PROMPT,
       userPrompt: buildDreamProjectRebuildPrompt(input),
       requestLabel: "Dream project rebuild",
-      timeoutMs: 30_000,
+      timeoutMs: input.timeoutMs ?? DEFAULT_DREAM_PROJECT_REBUILD_TIMEOUT_MS,
       ...(input.agentId ? { agentId: input.agentId } : {}),
     });
     const parsed = JSON.parse(extractFirstJsonObject(raw)) as RawDreamProjectPlanPayload;

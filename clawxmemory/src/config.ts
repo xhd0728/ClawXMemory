@@ -13,6 +13,7 @@ export interface PluginRuntimeConfig {
   autoIndexIntervalMinutes: number;
   autoDreamIntervalMinutes: number;
   autoDreamMinNewL1: number;
+  dreamProjectRebuildTimeoutMs: number;
   indexIdleDebounceMs: number;
   defaultIndexingSettings: IndexingSettings;
   recallEnabled: boolean;
@@ -67,6 +68,11 @@ export const pluginConfigJsonSchema = {
     autoDreamMinNewL1: {
       type: "integer",
       default: 10,
+    },
+    dreamProjectRebuildTimeoutMs: {
+      type: "integer",
+      default: 180000,
+      description: "Timeout in milliseconds for the Dream project rebuild LLM request. Set to 0 to disable the timeout.",
     },
     reasoningMode: {
       type: "string",
@@ -148,6 +154,11 @@ export const pluginConfigUiHints = {
     label: "Auto Dream L1 Threshold",
     placeholder: "10",
   },
+  dreamProjectRebuildTimeoutMs: {
+    label: "Dream Rebuild Timeout (ms)",
+    placeholder: "180000",
+    help: "Default is 180000ms. Set to 0 to disable the timeout for Dream project rebuild requests.",
+  },
   reasoningMode: {
     label: "Reasoning Mode",
     help: "answer_first stops at L2 evidence notes; accuracy_first can continue down to L1 and L0.",
@@ -198,6 +209,11 @@ function toInteger(value: unknown, fallback: number): number {
   return fallback;
 }
 
+function toNonNegativeInteger(value: unknown, fallback: number): number {
+  const parsed = toInteger(value, fallback);
+  return parsed >= 0 ? parsed : fallback;
+}
+
 export function buildPluginConfig(raw: unknown): PluginRuntimeConfig {
   const cfg = (raw ?? {}) as Record<string, unknown>;
   const dataDir = typeof cfg.dataDir === "string" && cfg.dataDir.trim()
@@ -224,6 +240,7 @@ export function buildPluginConfig(raw: unknown): PluginRuntimeConfig {
     autoIndexIntervalMinutes: Math.max(0, toInteger(cfg.autoIndexIntervalMinutes, 60)),
     autoDreamIntervalMinutes: Math.max(0, toInteger(cfg.autoDreamIntervalMinutes, 360)),
     autoDreamMinNewL1: Math.max(0, toInteger(cfg.autoDreamMinNewL1, 10)),
+    dreamProjectRebuildTimeoutMs: toNonNegativeInteger(cfg.dreamProjectRebuildTimeoutMs, 180_000),
     indexIdleDebounceMs: Math.max(200, toInteger(cfg.indexIdleDebounceMs, 2500)),
     defaultIndexingSettings: {
       reasoningMode: cfg.reasoningMode === "accuracy_first" ? "accuracy_first" : "answer_first",
@@ -231,6 +248,7 @@ export function buildPluginConfig(raw: unknown): PluginRuntimeConfig {
       autoIndexIntervalMinutes: Math.max(0, toInteger(cfg.autoIndexIntervalMinutes, 60)),
       autoDreamIntervalMinutes: Math.max(0, toInteger(cfg.autoDreamIntervalMinutes, 360)),
       autoDreamMinNewL1: Math.max(0, toInteger(cfg.autoDreamMinNewL1, 10)),
+      dreamProjectRebuildTimeoutMs: toNonNegativeInteger(cfg.dreamProjectRebuildTimeoutMs, 180_000),
     },
     recallEnabled: toBoolean(cfg.recallEnabled, true),
     addEnabled: toBoolean(cfg.addEnabled, true),

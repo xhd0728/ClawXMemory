@@ -401,6 +401,95 @@ describe("LlmMemoryExtractor hop debug trace", () => {
     }));
   });
 
+  it("forwards a custom timeout to Dream project rebuild planning", async () => {
+    const extractor = createExtractor();
+    const callStructuredJson = vi.spyOn(
+      extractor as never as { callStructuredJson: (input: { timeoutMs?: number }) => Promise<string> },
+      "callStructuredJson",
+    ).mockResolvedValue(JSON.stringify({
+      summary: "Merged duplicate travel topics into one project.",
+      duplicate_topic_count: 0,
+      conflict_topic_count: 0,
+      projects: [
+        {
+          project_key: "travel-plan",
+          project_name: "Travel Plan",
+          current_status: "in_progress",
+          summary: "The travel project was consolidated from recent L1 windows.",
+          latest_progress: "Kept only the strongest recent L1 window.",
+          retained_l1_ids: ["l1-1"],
+        },
+      ],
+      deleted_project_keys: [],
+      l1_issues: [],
+    }));
+
+    await extractor.planDreamProjectRebuild({
+      currentProjects: [createProject()],
+      profile: createProfile(),
+      l1Windows: [createL1()],
+      l0Sessions: [createL0()],
+      clusters: [],
+      timeoutMs: 42_000,
+    });
+
+    expect(callStructuredJson).toHaveBeenCalledWith(expect.objectContaining({
+      requestLabel: "Dream project rebuild",
+      timeoutMs: 42_000,
+    }));
+  });
+
+  it("does not register an abort timer when the Dream rebuild timeout is disabled", async () => {
+    const extractor = createExtractor();
+    vi.spyOn(
+      extractor as never as { resolveSelection: (agentId?: string) => unknown },
+      "resolveSelection",
+    ).mockReturnValue({
+      provider: "openai",
+      model: "gpt-test",
+      api: "chat",
+      baseUrl: "https://example.test/v1",
+      headers: {},
+    });
+    vi.spyOn(
+      extractor as never as { resolveApiKey: (provider: string) => Promise<string> },
+      "resolveApiKey",
+    ).mockResolvedValue("test-key");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: "{\"ok\":true}",
+            },
+          },
+        ],
+      }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+
+    const raw = await (extractor as never as {
+      callStructuredJson: (input: {
+        systemPrompt: string;
+        userPrompt: string;
+        requestLabel: string;
+        timeoutMs?: number;
+      }) => Promise<string>;
+    }).callStructuredJson({
+      systemPrompt: "system",
+      userPrompt: "user",
+      requestLabel: "Dream project rebuild",
+      timeoutMs: 0,
+    });
+
+    expect(raw).toBe("{\"ok\":true}");
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("parses Dream global profile rewrites with exact supporting L1 ids", async () => {
     const extractor = createExtractor();
     vi.spyOn(extractor as never as { callStructuredJson: (input: unknown) => Promise<string> }, "callStructuredJson")
