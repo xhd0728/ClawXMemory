@@ -715,6 +715,181 @@ describe("MemoryPluginRuntime", () => {
     runtime.stop();
   });
 
+  it("starts only once even if the plugin service start hook is invoked repeatedly", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const rescheduleBackgroundTasks = vi
+      .spyOn(runtime as never as { rescheduleBackgroundTasks: () => void }, "rescheduleBackgroundTasks")
+      .mockImplementation(() => {});
+    const runStartupInitialization = vi
+      .spyOn(runtime as never as { runStartupInitialization: () => Promise<void> }, "runStartupInitialization")
+      .mockResolvedValue(undefined);
+
+    runtime.start();
+    runtime.start();
+
+    expect(rescheduleBackgroundTasks).toHaveBeenCalledTimes(1);
+    expect(runStartupInitialization).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips command-only turns until the next real user turn", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "user",
+          content: "/new",
+        },
+      } as never,
+      { sessionKey: "session-command-only" } as never,
+    );
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "assistant",
+          content: "Started a new session.",
+        },
+      } as never,
+      { sessionKey: "session-command-only" } as never,
+    );
+
+    expect(runtime.repository.listRecentL0(10)).toEqual([]);
+
+    runtime.handleBeforeMessageWrite(
+      {
+        message: {
+          role: "user",
+          content: "真正的问题",
+        },
+      } as never,
+      { sessionKey: "session-command-only" } as never,
+    );
+    await runtime.handleAgentEnd(
+      {
+        success: true,
+        messages: [
+          { role: "user", content: "真正的问题" },
+          { role: "assistant", content: "这是实际回答。" },
+        ],
+      } as never,
+      { sessionKey: "session-command-only" } as never,
+    );
+
+    expect(runtime.repository.listRecentL0(10)).toMatchObject([
+      {
+        sessionKey: "session-command-only",
+        messages: [
+          { role: "user", content: "真正的问题" },
+          { role: "assistant", content: "这是实际回答。" },
+        ],
+      },
+    ]);
+  });
+
+  it("rotates exactly one conversation window for /new and /reset startup markers", async () => {
+    for (const action of ["new", "reset"] as const) {
+      const dir = await mkdtemp(join(tmpdir(), `clawxmemory-runtime-${action}-`));
+      cleanupPaths.push(dir);
+
+      const runtime = new MemoryPluginRuntime({
+        apiConfig: {},
+        pluginRuntime: undefined,
+        pluginConfig: {
+          dbPath: join(dir, "memory.sqlite"),
+          uiEnabled: false,
+        },
+        logger: undefined,
+      });
+      runtimes.push(runtime);
+
+      runtime.handleInternalCommandEvent(
+        {
+          type: "command",
+          action,
+          sessionKey: `session-${action}`,
+        } as never,
+      );
+      const blocked = runtime.handleBeforeMessageWrite(
+        {
+          message: {
+            role: "user",
+            content: "A new session was started via /new or /reset.",
+          },
+        } as never,
+        { sessionKey: `session-${action}` } as never,
+      );
+
+      expect(blocked).toEqual({ block: true });
+      expect((runtime as never as {
+        getEffectiveSessionKey: (sessionKey: string) => string;
+      }).getEffectiveSessionKey(`session-${action}`)).toBe(`session-${action}#window:1`);
+      runtime.handleBeforeMessageWrite(
+        {
+          message: {
+            role: "assistant",
+            content: "",
+          },
+        } as never,
+        { sessionKey: `session-${action}` } as never,
+      );
+
+      runtime.handleBeforeMessageWrite(
+        {
+          message: {
+            role: "user",
+            content: `跟进${action}后的真实问题`,
+          },
+        } as never,
+        { sessionKey: `session-${action}` } as never,
+      );
+      await runtime.handleAgentEnd(
+        {
+          success: true,
+          messages: [
+            { role: "user", content: `跟进${action}后的真实问题` },
+            { role: "assistant", content: `这是${action}后的回答。` },
+          ],
+        } as never,
+        { sessionKey: `session-${action}` } as never,
+      );
+
+      expect(runtime.repository.listRecentL0(10)).toMatchObject([
+        {
+          sessionKey: `session-${action}#window:1`,
+          messages: [
+            { role: "user", content: `跟进${action}后的真实问题` },
+            { role: "assistant", content: `这是${action}后的回答。` },
+          ],
+        },
+      ]);
+    }
+  });
+
   it("repairs contaminated l0 records on startup and requeues rebuild", async () => {
     const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
     cleanupPaths.push(dir);
@@ -786,6 +961,40 @@ describe("MemoryPluginRuntime", () => {
     });
 
     runtime.stop();
+  });
+
+  it("starts lazily from gateway hook activity and exposes a 4.2 memory runtime adapter", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "clawxmemory-runtime-"));
+    cleanupPaths.push(dir);
+
+    const runtime = new MemoryPluginRuntime({
+      apiConfig: {},
+      pluginRuntime: undefined,
+      pluginConfig: {
+        dbPath: join(dir, "memory.sqlite"),
+        uiEnabled: false,
+      },
+      logger: undefined,
+    });
+    runtimes.push(runtime);
+
+    const startSpy = vi.spyOn(runtime, "start").mockImplementation(() => {});
+
+    runtime.handleInternalCommandEvent({
+      type: "command",
+      action: "status",
+      sessionKey: "session-command-bootstrap",
+    } as never);
+
+    expect(startSpy).toHaveBeenCalledTimes(1);
+
+    const adapter = runtime.getMemoryRuntimeAdapter();
+    expect(adapter.resolveMemoryBackendConfig()).toEqual({ backend: "builtin" });
+    await expect(adapter.getMemorySearchManager()).resolves.toEqual({
+      manager: null,
+      error: "ClawXMemory manages dynamic session memory and does not expose OpenClaw file-memory search managers.",
+    });
+    expect(startSpy).toHaveBeenCalledTimes(3);
   });
 
   it("writes managed config and requests a gateway restart on first startup when native memory is still enabled", async () => {

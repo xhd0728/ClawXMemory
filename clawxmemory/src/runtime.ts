@@ -856,12 +856,35 @@ export class MemoryPluginRuntime {
     });
   }
 
+  getMemoryRuntimeAdapter() {
+    return {
+      getMemorySearchManager: async (): Promise<{
+        manager: null;
+        error: string;
+      }> => {
+        this.ensureStarted();
+        return {
+          manager: null,
+          error: "ClawXMemory manages dynamic session memory and does not expose OpenClaw file-memory search managers.",
+        };
+      },
+      resolveMemoryBackendConfig: (): { backend: "builtin" } => {
+        this.ensureStarted();
+        return { backend: "builtin" };
+      },
+      closeAllMemorySearchManagers: async (): Promise<void> => {},
+    };
+  }
+
   start(): void {
     if (this.started || this.stopped) return;
     this.started = true;
     this.rescheduleBackgroundTasks();
     this.uiServer?.start();
-    void this.runStartupInitialization();
+    void this.runStartupInitialization().catch((error) => {
+      if (this.stopped) return;
+      this.logger.warn?.(`[clawxmemory] startup initialization failed: ${String(error)}`);
+    });
   }
 
   stop(): void {
@@ -881,6 +904,11 @@ export class MemoryPluginRuntime {
     this.pendingCommandReplyByRawSession.clear();
     this.uiServer?.stop();
     this.repository.close();
+  }
+
+  private ensureStarted(): void {
+    if (this.started || this.stopped) return;
+    this.start();
   }
 
   private appendPendingMessage(sessionKey: string, message: MemoryMessage): void {
@@ -1018,6 +1046,7 @@ export class MemoryPluginRuntime {
 
   handleInternalMessageReceived = (event: InternalHookEvent): void => {
     if (event.type !== "message" || event.action !== "received") return;
+    this.ensureStarted();
     const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
     if (!rawSessionKey || rawSessionKey.startsWith("temp:")) return;
 
@@ -1043,6 +1072,7 @@ export class MemoryPluginRuntime {
 
   handleInternalCommandEvent = (event: InternalHookEvent): void => {
     if (event.type !== "command") return;
+    this.ensureStarted();
     const rawSessionKey = typeof event.sessionKey === "string" ? event.sessionKey.trim() : "";
     if (!rawSessionKey || rawSessionKey.startsWith("temp:")) return;
 
@@ -1063,6 +1093,7 @@ export class MemoryPluginRuntime {
     event: PluginHookBeforePromptBuildEvent,
     ctx: PluginHookAgentContext,
   ): Promise<PluginHookBeforePromptBuildResult | void> => {
+    this.ensureStarted();
     const prompt = typeof event.prompt === "string" ? event.prompt : "";
     const normalizedPrompt = canonicalizeUserQuery(prompt);
     const rawSessionKey = typeof ctx.sessionKey === "string" && ctx.sessionKey.trim()
@@ -1117,6 +1148,7 @@ export class MemoryPluginRuntime {
     event: PluginHookBeforeMessageWriteEvent,
     ctx: { agentId?: string; sessionKey?: string },
   ): PluginHookBeforeMessageWriteResult | void => {
+    this.ensureStarted();
     const rawSessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey.trim() : "";
     if (!rawSessionKey || rawSessionKey.startsWith("temp:")) return;
     const messageInfo = inspectTranscriptMessage(event.message);
@@ -1198,6 +1230,7 @@ export class MemoryPluginRuntime {
     event: PluginHookBeforeToolCallEvent,
     ctx: PluginHookToolContext,
   ): void => {
+    this.ensureStarted();
     const rawSessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey.trim() : "";
     if (!rawSessionKey || rawSessionKey.startsWith("temp:")) return;
     const query = this.getActiveCase(rawSessionKey)?.query ?? "";
@@ -1219,6 +1252,7 @@ export class MemoryPluginRuntime {
     event: PluginHookAfterToolCallEvent,
     ctx: PluginHookToolContext,
   ): void => {
+    this.ensureStarted();
     const rawSessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey.trim() : "";
     if (!rawSessionKey || rawSessionKey.startsWith("temp:")) return;
     const query = this.getActiveCase(rawSessionKey)?.query ?? "";
@@ -1245,6 +1279,7 @@ export class MemoryPluginRuntime {
   };
 
   handleAgentEnd = async (event: PluginHookAgentEndEvent, ctx: PluginHookAgentContext): Promise<void> => {
+    this.ensureStarted();
     if (!this.config.addEnabled) return;
     if (shouldSkipCapture(event as unknown as Record<string, unknown>, ctx as Record<string, unknown>)) return;
 
@@ -1318,6 +1353,7 @@ export class MemoryPluginRuntime {
   };
 
   handleBeforeReset = async (event: PluginHookBeforeResetEvent, ctx: PluginHookAgentContext): Promise<void> => {
+    this.ensureStarted();
     if (!this.config.addEnabled) return;
     const fallbackRawSession = typeof ctx.sessionKey === "string" && ctx.sessionKey.trim()
       ? this.getEffectiveSessionKey(ctx.sessionKey)
@@ -1662,11 +1698,22 @@ export class MemoryPluginRuntime {
   }
 
   private startBackgroundRepair(): void {
-    const repairedVersion = this.repository.getPipelineState("repairVersion");
+    if (this.stopped) return;
+    let repairedVersion: string | undefined;
+    let cachedSnapshot: MemoryUiSnapshot;
+    try {
+      repairedVersion = this.repository.getPipelineState("repairVersion");
+      cachedSnapshot = this.repository.getUiSnapshot(STARTUP_REPAIR_SNAPSHOT_LIMIT);
+    } catch (error) {
+      if (!this.stopped) {
+        this.logger.warn?.(`[clawxmemory] startup repair initialization failed: ${String(error)}`);
+      }
+      return;
+    }
     if (repairedVersion === MEMORY_REPAIR_VERSION) return;
-    const cachedSnapshot = this.repository.getUiSnapshot(STARTUP_REPAIR_SNAPSHOT_LIMIT);
     void (async () => {
       try {
+        if (this.stopped) return;
         const repair = this.repository.repairL0Sessions((record) => sanitizeL0Record(record, this.config));
         if (repair.updated === 0 && repair.removed === 0) {
           this.repository.setPipelineState("repairVersion", MEMORY_REPAIR_VERSION);
@@ -1700,8 +1747,9 @@ export class MemoryPluginRuntime {
 
   private async runStartupInitialization(): Promise<void> {
     const boundaryState = await this.reconcileManagedMemoryBoundary();
+    if (this.stopped) return;
     this.logMemoryBoundaryDiagnostics();
-    if (boundaryState !== "ready") return;
+    if (boundaryState !== "ready" || this.stopped) return;
     this.startBackgroundRepair();
   }
 

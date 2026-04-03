@@ -60,10 +60,10 @@
     "@sinclair/typebox": "^0.34.41"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.22"
+    "openclaw": ">=2026.4.2"
   },
   "devDependencies": {
-    "openclaw": "^2026.3.28",
+    "openclaw": "^2026.4.2",
     "vitest": "^4.0.5"
   },
   "openclaw": {
@@ -71,11 +71,11 @@
       "./src/index.ts"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.22",
-      "minGatewayVersion": "2026.3.22"
+      "pluginApi": ">=2026.4.2",
+      "minGatewayVersion": "2026.4.2"
     },
     "build": {
-      "openclawVersion": "2026.3.28"
+      "openclawVersion": "2026.4.2"
     }
   }
 }
